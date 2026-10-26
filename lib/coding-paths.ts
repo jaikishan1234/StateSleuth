@@ -7,7 +7,14 @@
  * could escape the project.
  */
 
-/** Files the coding agent is permitted to read and propose changes to. */
+/**
+ * Files the coding agent is permitted to read and propose changes to.
+ *
+ * Deliberately excluded: the safety machinery itself. Removing these from the
+ * allowlist means an approved proposal can never weaken the path rules, the
+ * proposal validator, the workflow guards, the approval service or the store.
+ * `lib/patch-apply.ts` is likewise excluded.
+ */
 export const PERMITTED_SOURCE_FILES = [
   "app/demo/page.tsx",
   "app/globals.css",
@@ -15,15 +22,9 @@ export const PERMITTED_SOURCE_FILES = [
   "components/demo/task-board.tsx",
   "components/icons.tsx",
   "lib/coding-agent.ts",
-  "lib/coding-fixture.ts",
-  "lib/coding-paths.ts",
-  "lib/coding-proposal.ts",
   "lib/planner.ts",
   "lib/planner-server.ts",
   "lib/tasks.ts",
-  "lib/workflow-service.ts",
-  "lib/workflow-store.ts",
-  "lib/workflow.ts",
 ] as const;
 
 export type PermittedSourceFile = (typeof PERMITTED_SOURCE_FILES)[number];

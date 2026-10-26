@@ -76,6 +76,41 @@ npm run dev
 The application runs with no configuration. Without model credentials,
 `/planner` uses demo mode and says so.
 
+### Running it on localhost only
+
+Approving a coding proposal writes real source files, so the code endpoints are
+restricted to loopback callers. Bind the server to the loopback interface:
+
+```bash
+npm run dev:local     # next dev -H 127.0.0.1
+npm run start:local   # next start -H 127.0.0.1
+```
+
+You can also pass the flag directly: `next dev -H 127.0.0.1` (or
+`--hostname 127.0.0.1`).
+
+The endpoints `POST /api/workflows/:id/code/approve` and
+`POST /api/workflows/:id/code/reject` additionally check that the `Host`
+header, any `X-Forwarded-For` hop and any `Origin` all point at loopback, and
+answer `403` otherwise.
+
+**This is a safeguard, not authentication.** A non-browser client controls its
+own headers and can forge a loopback `Host`/`Origin`; a misconfigured reverse
+proxy can also defeat the check. The bind address is the real protection. This
+project is a single-user local demo and is not designed to face a network.
+
+### Files a proposal may change
+
+Only these files may appear in a proposal, and only they can be written:
+
+`app/demo/page.tsx`, `app/globals.css`, `app/page.tsx`,
+`components/demo/task-board.tsx`, `components/icons.tsx`,
+`lib/coding-agent.ts`, `lib/planner.ts`, `lib/planner-server.ts`, `lib/tasks.ts`
+
+The safety machinery is deliberately excluded, so an approved proposal can never
+weaken the path rules, the proposal validator, the workflow guards, the
+approval service, the store or the patch applier.
+
 ## Feature planner
 
 `/planner` takes a plain-English feature request and returns a structured plan
@@ -190,9 +225,12 @@ A short manual pass, useful before any verification work:
 | Command             | Purpose                                       |
 | ------------------- | --------------------------------------------- |
 | `npm run dev`       | Start the development server with hot reload   |
+| `npm run dev:local` | Start the development server on 127.0.0.1 only  |
 | `npm run build`     | Create an optimised production build           |
 | `npm run start`     | Serve the production build                     |
+| `npm run start:local` | Serve the production build on 127.0.0.1 only  |
 | `npm run typecheck` | Type-check the project without emitting output |
+| `npm test`          | Run the domain, store and application tests     |
 
 ## Project structure
 

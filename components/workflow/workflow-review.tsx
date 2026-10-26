@@ -123,7 +123,7 @@ function DiffView({ diff }: { diff: string }) {
   );
 }
 
-function ProposalPanel({ proposal }: { proposal: ProposalView }) {
+function ProposalPanel({ proposal, diffOpen = true }: { proposal: ProposalView; diffOpen?: boolean }) {
   const isFixture = proposal.source === "fixture";
 
   return (
@@ -177,7 +177,13 @@ function ProposalPanel({ proposal }: { proposal: ProposalView }) {
         Proposed diff
       </h3>
       <div className="mt-2">
-        <DiffView diff={proposal.diff} />
+        {diffOpen ? (
+          <DiffView diff={proposal.diff} />
+        ) : (
+          <p className="rounded-lg border border-hairline bg-canvas/60 px-3 py-4 text-xs text-muted">
+            Diff hidden. Use “Review diff” below to show it.
+          </p>
+        )}
       </div>
 
       <p className="mt-4 flex items-start gap-2 text-xs leading-relaxed text-muted">
@@ -204,9 +210,16 @@ export function WorkflowReview() {
   const [list, setList] = useState<WorkflowView[]>([]);
   const [feature, setFeature] = useState("");
   const [reason, setReason] = useState("");
-  const [pending, setPending] = useState<"create" | "approve" | "reject" | "proposal" | null>(null);
+  const [pending, setPending] = useState<
+    "create" | "approve" | "reject" | "proposal" | "code-approve" | "code-reject" | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [showReject, setShowReject] = useState(false);
+  const [diffOpen, setDiffOpen] = useState(true);
+  const [confirmApply, setConfirmApply] = useState(false);
+  const [filesChanged, setFilesChanged] = useState<string[] | null>(null);
+  const [codeReason, setCodeReason] = useState("");
+  const [showCodeReject, setShowCodeReject] = useState(false);
 
   const refreshList = useCallback(async () => {
     try {
@@ -259,6 +272,9 @@ export function WorkflowReview() {
       setFeature("");
       setReason("");
       setShowReject(false);
+      setConfirmApply(false);
+      setShowCodeReject(false);
+      setCodeReason("");
       await refreshList();
     } catch {
       setError("Could not reach the workflow API. Check your connection and try again.");
@@ -365,8 +381,108 @@ export function WorkflowReview() {
     }
   }
 
+  async function handleApproveCode() {
+    if (!workflow || pending) return;
+    if (!confirmApply) {
+      setError("Confirm that you understand the patch will be written to source files.");
+      return;
+    }
+
+    setPending("code-approve");
+    setError(null);
+    setFilesChanged(null);
+
+    try {
+      const response = await fetch(`/api/workflows/${workflow.id}/code/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      });
+
+      const payload: unknown = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        const detail = (payload ?? {}) as { applied?: unknown; filesChanged?: unknown };
+        const changed = Array.isArray(detail.applied)
+          ? detail.applied.filter((entry): entry is string => typeof entry === "string")
+          : [];
+
+        if (detail.filesChanged === true) {
+          setFilesChanged(changed);
+        }
+
+        setError(readError(payload, "The code could not be approved."));
+
+        // The server may have changed state; show what it actually recorded.
+        try {
+          const refreshed = await fetch(`/api/workflows/${workflow.id}`, { cache: "no-store" });
+          if (refreshed.ok) {
+            const fresh = (await refreshed.json()) as { workflow?: WorkflowView };
+            if (fresh.workflow) setWorkflow(fresh.workflow);
+          }
+        } catch {
+          // The error above is the important part.
+        }
+
+        await refreshList();
+        return;
+      }
+
+      const updated = (payload as { workflow?: WorkflowView }).workflow;
+      if (updated) setWorkflow(updated);
+      setConfirmApply(false);
+      await refreshList();
+    } catch {
+      setError("Could not reach the workflow API. Check your connection and try again.");
+    } finally {
+      setPending(null);
+    }
+  }
+
+  async function handleRejectCode(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!workflow || pending) return;
+    if (codeReason.trim().length < 3) {
+      setError("Give a rejection reason of at least 3 characters.");
+      return;
+    }
+
+    setPending("code-reject");
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/workflows/${workflow.id}/code/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: codeReason.trim() }),
+      });
+
+      const payload: unknown = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        setError(readError(payload, "The code could not be rejected."));
+        return;
+      }
+
+      const updated = (payload as { workflow?: WorkflowView }).workflow;
+      if (updated) setWorkflow(updated);
+      setCodeReason("");
+      setShowCodeReject(false);
+      await refreshList();
+    } catch {
+      setError("Could not reach the workflow API. Check your connection and try again.");
+    } finally {
+      setPending(null);
+    }
+  }
+
   const approvable = workflow?.status === "awaiting_plan_approval";
   const canRequestProposal = workflow?.status === "coding";
+  const awaitingCode = workflow?.status === "awaiting_code_approval";
+  const appliedNote =
+    workflow?.status === "verifying"
+      ? [...workflow.history].reverse().find((entry) => entry.note?.startsWith("Applied "))?.note
+      : undefined;
   const busy = pending !== null;
 
   return (
@@ -419,6 +535,33 @@ export function WorkflowReview() {
           fixture. Nothing is generated by AI in that mode.
         </p>
       </form>
+
+      {filesChanged && (
+        <div role="alert" className="rounded-xl border border-red-500/40 bg-red-500/[0.1] p-4">
+          <div className="flex items-start gap-3">
+            <AlertIcon className="mt-0.5 size-4 shrink-0 text-red-400" />
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-red-200">
+                Source files may already have changed
+              </p>
+              <p className="mt-1 text-sm leading-relaxed text-red-200/80">
+                The patch was written to disk but the workflow could not be updated. Inspect
+                <code className="mx-1 font-mono text-[0.72rem]">git diff</code>
+                before retrying or doing anything else.
+              </p>
+              {filesChanged.length > 0 && (
+                <ul className="mt-2 space-y-1">
+                  {filesChanged.map((file) => (
+                    <li key={file} className="font-mono text-[0.72rem] text-red-200/80">
+                      {file}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div role="alert" className="rounded-xl border border-red-500/30 bg-red-500/[0.07] p-4">
@@ -565,7 +708,140 @@ export function WorkflowReview() {
             </p>
           </section>
 
-          {workflow.proposal && <ProposalPanel proposal={workflow.proposal} />}
+          {workflow.proposal && (
+            <ProposalPanel proposal={workflow.proposal} diffOpen={diffOpen} />
+          )}
+
+          {awaitingCode && workflow.proposal && (
+            <section className="hairline-card rounded-2xl p-5 sm:p-6">
+              <div className="flex items-center gap-2.5">
+                <ShieldIcon className="size-4 text-attention" />
+                <h2 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">
+                  Code approval
+                </h2>
+              </div>
+
+              <p className="mt-3 text-sm leading-relaxed text-ink/90">
+                Approving <strong className="text-ink">writes these files to disk</strong>. The
+                diff is revalidated immediately before it is applied, and every path must still be
+                on the allowlist. Nothing runs: no shell command, no script, no verification.
+              </p>
+
+              <ul className="mt-3 space-y-1">
+                {workflow.proposal.files.map((file) => (
+                  <li key={file.path}>
+                    <code className="font-mono text-[0.72rem] text-ink">{file.path}</code>
+                  </li>
+                ))}
+              </ul>
+
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDiffOpen((open) => !open)}
+                  disabled={busy}
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-hairline bg-surface px-4 text-sm font-medium text-ink transition-colors hover:border-white/20 disabled:opacity-40"
+                >
+                  <TerminalIcon className="size-4" />
+                  {diffOpen ? "Hide diff" : "Review diff"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => void handleApproveCode()}
+                  disabled={busy || !confirmApply}
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-verified px-4 text-sm font-semibold text-[#04110c] transition-colors hover:bg-[#4ade80] disabled:cursor-not-allowed disabled:bg-verified/30 disabled:text-[#04110c]/50"
+                >
+                  <CheckIcon className="size-4" />
+                  {pending === "code-approve" ? "Applying…" : "Approve code"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowCodeReject((open) => !open)}
+                  disabled={busy}
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-hairline bg-surface px-4 text-sm font-medium text-ink transition-colors hover:border-white/20 disabled:opacity-40"
+                >
+                  <CrossIcon className="size-4" />
+                  Reject code
+                </button>
+              </div>
+
+              <label className="mt-4 flex items-start gap-2.5 text-xs leading-relaxed text-muted">
+                <input
+                  type="checkbox"
+                  checked={confirmApply}
+                  onChange={(event) => setConfirmApply(event.target.checked)}
+                  disabled={busy}
+                  className="mt-0.5 size-4 shrink-0 rounded border-white/20 bg-canvas/60"
+                />
+                <span>
+                  I understand that approving writes {workflow.proposal.files.length} file(s) to
+                  disk, and that this is the only change applied.
+                </span>
+              </label>
+
+              {showCodeReject && (
+                <form onSubmit={handleRejectCode} className="mt-4 rounded-xl border border-hairline bg-canvas/50 p-4">
+                  <label htmlFor="code-reject-reason" className="text-sm font-semibold text-ink">
+                    Why are you rejecting this code?
+                  </label>
+                  <p className="mt-1 text-xs text-muted">
+                    The reason is recorded in the workflow history. No file is written.
+                  </p>
+                  <textarea
+                    id="code-reject-reason"
+                    value={codeReason}
+                    onChange={(event) => setCodeReason(event.target.value)}
+                    rows={3}
+                    maxLength={500}
+                    disabled={busy}
+                    placeholder="e.g. The diff changes more than the plan asked for."
+                    className="mt-3 w-full resize-y rounded-lg border border-hairline bg-canvas/80 p-3 text-sm leading-relaxed text-ink transition-colors placeholder:text-muted/50 focus:border-attention/60 focus:outline-none disabled:opacity-60"
+                  />
+                  <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:justify-end">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowCodeReject(false);
+                        setCodeReason("");
+                      }}
+                      disabled={busy}
+                      className="h-9 rounded-lg border border-hairline px-3 text-xs text-muted transition-colors hover:text-ink disabled:opacity-40"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 text-xs font-semibold text-red-200 transition-colors hover:bg-red-500/20 disabled:opacity-40"
+                    >
+                      <CrossIcon className="size-3.5" />
+                      {pending === "code-reject" ? "Rejecting…" : "Confirm rejection"}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </section>
+          )}
+
+          {appliedNote && (
+            <section className="rounded-xl border border-verified/30 bg-verified/[0.06] p-4 sm:p-5">
+              <div className="flex items-start gap-2.5">
+                <CheckIcon className="mt-0.5 size-4 shrink-0 text-verified" />
+                <div>
+                  <p className="text-sm font-semibold text-verified">Code approved and applied</p>
+                  <p className="mt-1 font-mono text-[0.72rem] leading-relaxed text-ink/80">
+                    {appliedNote.replace(/^Applied /, "")}
+                  </p>
+                  <p className="mt-2 text-xs leading-relaxed text-muted">
+                    The workflow is now in <strong className="text-ink">verifying</strong>. Browser
+                    verification is not implemented yet.
+                  </p>
+                </div>
+              </div>
+            </section>
+          )}
 
           {workflow.plan && (
             <PlanResult
@@ -650,6 +926,11 @@ export function WorkflowReview() {
                       setWorkflow(item);
                       setError(null);
                       setShowReject(false);
+                      setConfirmApply(false);
+                      setShowCodeReject(false);
+                      setCodeReason("");
+                      setDiffOpen(true);
+                      setFilesChanged(null);
                     }}
                     disabled={busy}
                     className="rounded-full border border-hairline px-2.5 py-1 text-[0.7rem] text-muted transition-colors hover:text-ink disabled:opacity-40"

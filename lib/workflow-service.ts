@@ -9,12 +9,14 @@
 import { randomUUID } from "node:crypto";
 import { requestProposal } from "./coding-agent.ts";
 import { isStoredProposal, type CodingProposal } from "./coding-proposal.ts";
+import { applyProposal, captureProposalSnapshot } from "./patch-apply.ts";
 import { generatePlan, type PlanOutcome } from "./planner-server.ts";
 import { PLANNER_LIMITS, type FeaturePlan } from "./planner.ts";
 import {
   approvePlan,
   createWorkflow,
   rejectWorkflow,
+  sanitizeMessage,
   toSafeFailure,
   transition,
   type Workflow,
@@ -26,7 +28,16 @@ import { getWorkflowStore, type WorkflowStore } from "./workflow-store.ts";
 
 export type ServiceResult<T> =
   | { ok: true; value: T }
-  | { ok: false; status: number; error: string; failure?: WorkflowFailure };
+  | {
+      ok: false;
+      status: number;
+      error: string;
+      failure?: WorkflowFailure;
+      /** Files left modified on disk when the request failed. */
+      applied?: string[];
+      /** True when source files may already have changed. */
+      filesChanged?: boolean;
+    };
 
 export const REJECTION_REASON_MIN = 3;
 export const REJECTION_REASON_MAX = 500;
@@ -232,6 +243,8 @@ export type RequestProposalOptions = {
   now?: number;
   /** Forces the deterministic fixture. Used by tests and the demo. */
   useFixture?: boolean;
+  /** Project root used to snapshot target files. */
+  projectRoot?: string;
 };
 
 /**
@@ -292,9 +305,16 @@ export async function requestCodeProposal(
     };
   }
 
+  // Record the current content hashes so a later approval can detect a stale
+  // proposal instead of overwriting newer work.
+  const withSnapshot = await captureProposalSnapshot(
+    options.projectRoot ?? process.cwd(),
+    result.proposal,
+  );
+
   // Defence in depth: the domain refuses an invalid proposal too, but the
   // service should never hand one over in the first place.
-  if (!isStoredProposal(result.proposal)) {
+  if (!isStoredProposal(withSnapshot)) {
     return {
       ok: false,
       status: 500,
@@ -305,7 +325,7 @@ export async function requestCodeProposal(
   const moved = transition(workflow, "awaiting_code_approval", {
     actor: "coding_agent",
     at: now,
-    proposal: result.proposal,
+    proposal: withSnapshot,
   });
 
   if (!moved.ok) {
@@ -355,6 +375,247 @@ export async function rejectWorkflowPlan(
   const workflow = await store.get(options.id);
   if (!workflow) {
     return { ok: false, status: 404, error: "No workflow with that id." };
+  }
+
+  const result = rejectWorkflow(workflow, reason, { at: now });
+  if (!result.ok) {
+    return {
+      ok: false,
+      status: result.failure.code === "invalid_transition" ? 409 : 400,
+      error: result.failure.message,
+      failure: result.failure,
+    };
+  }
+
+  await store.save(result.value);
+  return { ok: true, value: toWorkflowView(result.value) };
+}
+
+export const CODE_REJECTION_REASON_MIN = 3;
+export const CODE_REJECTION_REASON_MAX = 500;
+
+function applyFailureStatus(code: string): number {
+  if (code === "stale" || code === "conflict" || code === "missing_snapshot" || code === "invalid_proposal") {
+    return 409;
+  }
+  if (code === "io_error") return 500;
+  return 400;
+}
+
+export type ApproveCodeOptions = {
+  id: string;
+  store?: WorkflowStore;
+  now?: number;
+  projectRoot?: string;
+  /**
+   * Must be exactly `true`. The client has to confirm that source files will be
+   * written; anything else is refused.
+   */
+  confirm?: unknown;
+  /** Test seam: lets tests simulate application outcomes. */
+  applyImpl?: typeof applyProposal;
+};
+
+/**
+ * Human approval of the code proposal, which applies the patch.
+ *
+ * The stored proposal is revalidated and re-hashed immediately before use. The
+ * client never supplies paths, diff contents, a status or an actor.
+ */
+export async function approveCodeProposal(
+  options: ApproveCodeOptions,
+): Promise<ServiceResult<WorkflowView>> {
+  const store = options.store ?? getWorkflowStore();
+  const now = options.now ?? Date.now();
+
+  if (options.confirm !== true) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Confirm that the proposed changes should be written to source files.",
+    };
+  }
+
+  const workflow = await store.get(options.id);
+  if (!workflow) {
+    return { ok: false, status: 404, error: "No workflow with that id." };
+  }
+
+  if (workflow.status !== "awaiting_code_approval") {
+    return {
+      ok: false,
+      status: 409,
+      error: `Code can only be approved while the workflow is awaiting code approval. This one is ${workflow.status}.`,
+    };
+  }
+
+  if (!workflow.proposal) {
+    return {
+      ok: false,
+      status: 409,
+      error: "This workflow has no coding proposal to approve.",
+    };
+  }
+
+  if (!isStoredProposal(workflow.proposal)) {
+    return {
+      ok: false,
+      status: 409,
+      error: "The stored coding proposal is not valid.",
+    };
+  }
+
+const apply = options.applyImpl ?? applyProposal;
+  const applied = await apply({
+    projectRoot: options.projectRoot ?? process.cwd(),
+    proposal: workflow.proposal,
+  });
+
+  if (!applied.ok) {
+    const message = applied.failure.message;
+
+    // Files are still modified on disk: this is the only case that is not
+    // recoverable, because the working tree no longer matches the snapshot.
+    if (applied.applied.length > 0) {
+      const failure = toSafeFailure({ code: "unexpected_error", message, at: now }, now);
+      const failed = transition(workflow, "failed", {
+        actor: "system",
+        at: now,
+        failure,
+        note: sanitizeMessage(
+          `Apply failed; these files were changed and not restored: ${applied.applied.join(", ")}`,
+        ),
+      });
+
+      if (failed.ok) {
+        try {
+          await store.save(failed.value);
+        } catch {
+          console.error("[workflow] could not persist the failed state after a partial apply");
+        }
+      }
+
+      return {
+        ok: false,
+        status: 500,
+        error: `${message} The workflow was marked failed.`,
+        failure,
+        applied: applied.applied,
+        filesChanged: true,
+      };
+    }
+
+    // Nothing remains modified. A rolled-back write failure leaves the
+    // workflow where it was so the same proposal can be retried safely.
+    const retryable = applied.failure.code === "io_error" && applied.rolledBack;
+    return {
+      ok: false,
+      status: retryable ? 500 : applyFailureStatus(applied.failure.code),
+      error: retryable
+        ? `${message} No source file was changed, so you can retry the approval.`
+        : message,
+      failure: {
+        code: applied.failure.code === "stale" ? "invalid_transition" : "unexpected_error",
+        message,
+        at: now,
+      },
+      applied: [],
+      filesChanged: false,
+    };
+  }
+
+  const moved = transition(workflow, "verifying", {
+    actor: "human",
+    at: now,
+    note: sanitizeMessage(`Applied ${applied.applied.length} file(s): ${applied.applied.join(", ")}`),
+  });
+
+  if (!moved.ok) {
+    return {
+      ok: false,
+      status: 409,
+      error: moved.failure.message,
+      failure: moved.failure,
+    };
+  }
+
+  // The files are already written. If persistence fails, say so explicitly:
+  // the user must not be told the workflow is merely awaiting approval when
+  // the working tree has changed.
+  let persisted = true;
+  try {
+    await store.save(moved.value);
+  } catch {
+    try {
+      await store.save(moved.value);
+      persisted = true;
+    } catch {
+      persisted = false;
+    }
+  }
+
+  if (!persisted) {
+    console.error("[workflow] source files were written but the workflow could not be saved");
+    return {
+      ok: false,
+      status: 500,
+      error:
+        "The patch was written to disk, but the workflow could not be saved. Source files have already changed — inspect `git diff` before continuing.",
+      failure: {
+        code: "unexpected_error",
+        message: "The workflow state could not be persisted after the patch was applied.",
+        at: now,
+      },
+      applied: applied.applied,
+      filesChanged: true,
+    };
+  }
+
+  return { ok: true, value: toWorkflowView(moved.value) };
+}
+
+export type RejectCodeOptions = {
+  id: string;
+  reason: string;
+  store?: WorkflowStore;
+  now?: number;
+};
+
+/** Human rejection of the code proposal. A reason is required. */
+export async function rejectCodeProposal(
+  options: RejectCodeOptions,
+): Promise<ServiceResult<WorkflowView>> {
+  const store = options.store ?? getWorkflowStore();
+  const now = options.now ?? Date.now();
+  const reason = options.reason.trim();
+
+  if (reason.length < CODE_REJECTION_REASON_MIN) {
+    return {
+      ok: false,
+      status: 400,
+      error: `Give a rejection reason of at least ${CODE_REJECTION_REASON_MIN} characters.`,
+    };
+  }
+
+  if (reason.length > CODE_REJECTION_REASON_MAX) {
+    return {
+      ok: false,
+      status: 400,
+      error: `Keep the rejection reason under ${CODE_REJECTION_REASON_MAX} characters.`,
+    };
+  }
+
+  const workflow = await store.get(options.id);
+  if (!workflow) {
+    return { ok: false, status: 404, error: "No workflow with that id." };
+  }
+
+  if (workflow.status !== "awaiting_code_approval") {
+    return {
+      ok: false,
+      status: 409,
+      error: `Code can only be rejected while the workflow is awaiting code approval. This one is ${workflow.status}.`,
+    };
   }
 
   const result = rejectWorkflow(workflow, reason, { at: now });

@@ -20,6 +20,12 @@ export type ProposalFile = {
   summary: string;
 };
 
+/** A content hash taken when the proposal was created. */
+export type ProposalSnapshot = {
+  path: string;
+  sha256: string;
+};
+
 export type CodingProposal = {
   id: string;
   /** `live` means a model produced this. `fixture` means it did not. */
@@ -35,6 +41,11 @@ export type CodingProposal = {
   createdAt: number;
   /** Always set for a fixture, so it can never be mistaken for AI output. */
   notice?: string;
+  /**
+   * Hashes of the target files at proposal time. Required before the patch may
+   * be applied: a mismatch means the file changed and the proposal is stale.
+   */
+  snapshot?: ProposalSnapshot[];
 };
 
 export const PROPOSAL_LIMITS = {
@@ -216,6 +227,18 @@ export function isStoredProposal(value: unknown): value is CodingProposal {
 
   for (const path of diffHeaderPaths(diff)) {
     if (!isPermittedSourceFile(path)) return false;
+  }
+
+  if (candidate.snapshot !== undefined) {
+    if (!Array.isArray(candidate.snapshot) || candidate.snapshot.length > PROPOSAL_LIMITS.fileCountMax) {
+      return false;
+    }
+    for (const entry of candidate.snapshot) {
+      if (typeof entry !== "object" || entry === null) return false;
+      const record = entry as Record<string, unknown>;
+      if (typeof record.path !== "string" || !isPermittedSourceFile(record.path)) return false;
+      if (typeof record.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.sha256)) return false;
+    }
   }
 
   return true;

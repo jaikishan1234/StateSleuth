@@ -5,9 +5,11 @@
   "description": "A coding agent that independently verifies application behaviour.",
   "scripts": {
     "dev": "next dev",
+    "dev:local": "next dev -H 127.0.0.1",
     "build": "next build",
     "start": "next start",
-    "test": "node --test tests/workflow.test.ts tests/workflow-store.test.ts tests/coding-proposal.test.ts tests/workflow-fixture.test.ts",
+    "start:local": "next start -H 127.0.0.1",
+    "test": "node --test tests/workflow.test.ts tests/workflow-store.test.ts tests/coding-proposal.test.ts tests/workflow-fixture.test.ts tests/code-application.test.ts tests/hardening.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
