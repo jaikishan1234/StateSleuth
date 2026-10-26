@@ -17,6 +17,9 @@ next-env.d.ts
 # typescript
 *.tsbuildinfo
 
+# local workflow storage (written by the server at runtime)
+/.data/
+
 # env files
 .env
 .env*.local
