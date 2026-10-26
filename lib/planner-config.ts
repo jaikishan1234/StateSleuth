@@ -1,38 +1,51 @@
 /**
- * Server-only planner configuration.
+ * Planner configuration view for the UI.
  *
- * Never import this module from a client component: it reads credentials.
+ * Server-only. Delegates to the shared provider layer so the planner page and
+ * the request path agree on one configuration. Never import from a client
+ * component: it reads credentials.
  */
+
+import {
+  DEFAULT_PROVIDER,
+  PROVIDER_DEFAULTS,
+  resolveProviderConfig,
+  type ProviderId,
+} from "./provider-config.ts";
 
 export type PlannerConfig = {
   configured: boolean;
   apiKey?: string;
   baseUrl: string;
   model: string;
+  provider: ProviderId;
   providerHost: string;
+  /** Set when the environment names a provider that cannot be used. */
+  configError?: string;
 };
 
-function readEnv(name: string): string {
-  return process.env[name]?.trim() ?? "";
-}
-
 export function getPlannerConfig(): PlannerConfig {
-  const apiKey = readEnv("PLANNER_API_KEY") || readEnv("OPENAI_API_KEY");
-  const baseUrl = readEnv("PLANNER_BASE_URL") || "https://api.openai.com/v1";
-  const model = readEnv("PLANNER_MODEL") || "gpt-4o-mini";
+  const resolution = resolveProviderConfig("planner");
 
-  let providerHost = "unknown";
-  try {
-    providerHost = new URL(baseUrl).host;
-  } catch {
-    providerHost = "invalid-url";
+  if (resolution.ok) {
+    const { configured, apiKey, baseUrl, model, provider, providerHost } = resolution.config;
+    return {
+      configured,
+      ...(apiKey ? { apiKey } : {}),
+      baseUrl,
+      model,
+      provider,
+      providerHost,
+    };
   }
 
+  const defaults = PROVIDER_DEFAULTS[DEFAULT_PROVIDER];
   return {
-    configured: apiKey.length > 0,
-    apiKey: apiKey.length > 0 ? apiKey : undefined,
-    baseUrl,
-    model,
-    providerHost,
+    configured: false,
+    baseUrl: defaults.baseUrl,
+    model: defaults.model,
+    provider: DEFAULT_PROVIDER,
+    providerHost: "",
+    configError: resolution.error.message,
   };
 }

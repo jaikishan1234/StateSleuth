@@ -17,7 +17,7 @@ import {
   type ProposalSource,
 } from "./coding-proposal.ts";
 import { callChatCompletion } from "./planner-server.ts";
-import { getPlannerConfig } from "./planner-config.ts";
+import { ProviderError, resolveProviderConfig } from "./provider-config.ts";
 import type { FeaturePlan } from "./planner.ts";
 import { extractJsonObject } from "./planner.ts";
 
@@ -53,6 +53,8 @@ export type ProposalRequest = {
   /** Forces the deterministic fixture regardless of provider availability. */
   useFixture?: boolean;
   projectRoot?: string;
+  /** Test seam: lets tests inspect and stub the outbound request. */
+  fetchImpl?: typeof fetch;
 };
 
 export type ProposalResult =
@@ -153,7 +155,12 @@ function buildUserPrompt(
 export async function requestProposal(
   request: ProposalRequest,
 ): Promise<ProposalResult> {
-  const config = getPlannerConfig();
+  const resolution = resolveProviderConfig("coding");
+  if (!resolution.ok) {
+    return { ok: false, error: resolution.error.message };
+  }
+
+  const config = resolution.config;
   const useFixture = request.useFixture === true || !config.configured;
 
   if (useFixture) {
@@ -167,28 +174,33 @@ export async function requestProposal(
     };
   }
 
-  let raw: string;
+  let completion: Awaited<ReturnType<typeof callChatCompletion>>;
   try {
     const sources = await readPermittedSources(request.projectRoot);
-    raw = await callChatCompletion(
+    completion = await callChatCompletion(
+      "coding",
       CODING_SYSTEM_PROMPT,
       buildUserPrompt(request, sources),
+      request.fetchImpl ? { fetchImpl: request.fetchImpl } : {},
     );
   } catch (error) {
-    const reason = error instanceof Error ? error.message : "unknown error";
-    const timedOut =
-      reason.toLowerCase().includes("timeout") || reason.toLowerCase().includes("abort");
-    console.error(`[coding] proposal request failed: ${reason}`);
+    const providerError =
+      error instanceof ProviderError
+        ? error
+        : new ProviderError("request_failed", "The model request could not be completed.");
+    console.error(`[coding] proposal request failed: ${providerError.message}`);
 
     return {
       ok: false,
-      error: timedOut
-        ? "The coding request timed out. No fixture proposal was substituted."
-        : "The coding request failed. No fixture proposal was substituted.",
-      issues: [reason],
+      error:
+        providerError.code === "timeout"
+          ? "The coding request timed out. No fixture proposal was substituted."
+          : `The coding request failed (${providerError.code}). No fixture proposal was substituted.`,
+      issues: [providerError.message],
     };
   }
 
+  const raw = completion.content;
   const parsed = extractJsonObject(raw);
   if (parsed === null) {
     console.error("[coding] proposal output was not valid JSON");
@@ -200,7 +212,7 @@ export async function requestProposal(
 
   const validated = validateProposal(parsed, {
     source: "live" as ProposalSource,
-    model: config.model,
+    model: completion.model,
     id: request.id,
     createdAt: request.createdAt,
   });

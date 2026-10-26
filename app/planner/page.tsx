@@ -73,6 +73,7 @@ export default function PlannerPage() {
             <PlannerWorkspace
               configured={config.configured}
               model={config.configured ? config.model : undefined}
+              configError={config.configError}
             />
           </div>
 

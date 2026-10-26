@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useRef, useState } from "react";
 import type { FormEvent } from "react";
@@ -61,8 +61,10 @@ function readApiError(payload: unknown): ApiError | null {
 export function PlannerWorkspace({
   configured,
   model,
+  configError,
 }: {
   configured: boolean;
+  configError?: string;
   model?: string;
 }) {
   const [feature, setFeature] = useState("");
@@ -141,9 +143,11 @@ export function PlannerWorkspace({
     <div className="space-y-5">
       <div
         className={`rounded-xl border p-4 sm:p-5 ${
-          configured
-            ? "border-verified/25 bg-verified/[0.05]"
-            : "border-attention/30 bg-attention/[0.06]"
+          configError
+            ? "border-red-500/30 bg-red-500/[0.07]"
+            : configured
+              ? "border-verified/25 bg-verified/[0.05]"
+              : "border-attention/30 bg-attention/[0.06]"
         }`}
       >
         <div className="flex items-start gap-3">
@@ -162,14 +166,16 @@ export function PlannerWorkspace({
                 configured ? "text-verified" : "text-attention"
               }`}
             >
-              {configured ? "Live model configured" : "Demo mode"}
+              {configError ? "Provider configuration error" : configured ? "Live model configured" : "Demo mode"}
             </p>
             <p className="mt-1 text-xs leading-relaxed text-muted sm:text-sm">
-              {configured
-                ? `Requests are sent server-side to ${
-                    model ?? "the configured model"
-                  }. The API key stays on the server and is never sent to this page.`
-                : "No model credentials are configured on this server. Plans are generated locally from a sample template and labelled as demo output. No model call is made."}
+              {configError
+                ? configError
+                : configured
+                  ? `Requests are sent server-side to ${
+                      model ?? "the configured model"
+                    }. The API key stays on the server and is never sent to this page.`
+                  : "No model credentials are configured on this server. Plans are generated locally from a sample template and labelled as demo output. No model call is made."}
             </p>
           </div>
         </div>
@@ -222,7 +228,7 @@ export function PlannerWorkspace({
             className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-xl bg-verified px-4 text-sm font-semibold text-[#04110c] transition-colors hover:bg-[#4ade80] disabled:cursor-not-allowed disabled:bg-verified/40 disabled:text-[#04110c]/60"
           >
             <SparklesIcon className="size-4" />
-            {loading ? "Generating…" : "Generate plan"}
+            {loading ? "Generatingâ€¦" : "Generate plan"}
           </button>
         </div>
       </form>
@@ -250,7 +256,7 @@ export function PlannerWorkspace({
               {error.detail && error.detail.length > 0 && (
                 <ul className="mt-2 space-y-1 font-mono text-[0.7rem] text-red-200/60">
                   {error.detail.map((item) => (
-                    <li key={item}>— {item}</li>
+                    <li key={item}>â€” {item}</li>
                   ))}
                 </ul>
               )}
@@ -280,7 +286,7 @@ export function PlannerWorkspace({
           <p className="text-center text-xs text-muted">
             {configured
               ? "Waiting for the model. This can take a few seconds."
-              : "Assembling the demo plan…"}
+              : "Assembling the demo planâ€¦"}
           </p>
         </div>
       )}

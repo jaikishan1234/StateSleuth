@@ -130,7 +130,7 @@ limited to 6 per minute per client.
 
 | | Demo mode | Live mode |
 | --- | --- | --- |
-| Trigger | No API key configured | `PLANNER_API_KEY` or `OPENAI_API_KEY` set |
+| Trigger | No provider key configured and no provider named | Any agent API key set |
 | Source of the plan | Locally built sample template, seeded by your request | Model response, parsed and validated |
 | Labelling | Amber "Demo mode" banner and "Demo plan" badge | "Live model" badge with the model name |
 | Failure behaviour | Not applicable | Errors are shown as errors; the app never substitutes a demo plan |
@@ -139,28 +139,73 @@ The page tells you which mode is active before you submit, and every result is
 badged with the mode that actually produced it. Demo output is never presented
 as model output.
 
-### Enabling live mode
+### Model providers
 
-Any provider that speaks the OpenAI chat completions API works: OpenAI,
-OpenRouter, Groq, Together, a self-hosted gateway, or Ollama's compatible
-endpoint.
+Three providers are supported: **Gemini**, **Groq** and **OpenRouter**. All three
+are called through their OpenAI-compatible chat-completions endpoint, so the
+request shape is shared. The planner and the coding agent are configured
+**independently** — for example the planner can run on Gemini while the coding
+agent runs on Groq.
+
+Provider selection is resolved per agent (`PLANNER_*` and `CODING_*`), and each
+value falls back in a fixed order. First one that is set wins:
+
+| Setting | Agent variable | Shared variable | Fallback |
+| --- | --- | --- | --- |
+| Provider | `PLANNER_PROVIDER` / `CODING_PROVIDER` | `MODEL_PROVIDER` | `gemini` |
+| Model | `PLANNER_MODEL` / `CODING_MODEL` | — | provider default |
+| Base URL | `PLANNER_BASE_URL` / `CODING_BASE_URL` | — | provider default |
+| API key | `PLANNER_API_KEY` / `CODING_API_KEY` | `MODEL_API_KEY` | — |
+
+API key resolution is the only place a provider-wide variable is consulted:
+`<AGENT>_API_KEY` → the provider's own variable (`GEMINI_API_KEY`,
+`GROQ_API_KEY`, `OPENROUTER_API_KEY`) → `MODEL_API_KEY`. The coding agent never
+reads the planner's key, and vice versa.
+
+| Provider | Default base URL | Default model |
+| --- | --- | --- |
+| `gemini` | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-3.8-flash` |
+| `groq` | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
+| `openrouter` | `https://openrouter.ai/api/v1` | `openai/gpt-4o-mini` |
+
+The Gemini defaults preserve the configuration the project already used. You
+only need to change `PLANNER_MODEL` / `CODING_MODEL` for a different model.
+
+Setup:
 
 1. Copy `.env.example` to `.env.local`.
-2. Set `PLANNER_API_KEY`.
-3. Adjust `PLANNER_BASE_URL` and `PLANNER_MODEL` for your provider.
+2. Set the provider you want (`PLANNER_PROVIDER=groq`) and its key
+   (`PLANNER_API_KEY=...` or the shared `GROQ_API_KEY=...`).
+3. Optionally override the model or base URL for that agent.
 4. Restart `npm run dev`.
 
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `PLANNER_API_KEY` | Yes, for live mode | — | Bearer token, read only on the server |
-| `OPENAI_API_KEY` | Alternative | — | Used when `PLANNER_API_KEY` is absent |
-| `PLANNER_BASE_URL` | No | `https://api.openai.com/v1` | OpenAI-compatible base URL |
-| `PLANNER_MODEL` | No | `gpt-4o-mini` | Model identifier sent to the provider |
+Example — planner on Gemini, coding agent on OpenRouter:
 
-Keys are read in `lib/planner-config.ts`, which is imported only by server code
-(`app/planner/page.tsx` and `app/api/plan/route.ts`). The browser receives a
-boolean and a model name, never the key. Do not prefix these variables with
-`NEXT_PUBLIC_`.
+```bash
+PLANNER_PROVIDER=gemini
+PLANNER_API_KEY=...          # or GEMINI_API_KEY
+PLANNER_MODEL=gemini-3.8-flash
+
+CODING_PROVIDER=openrouter
+CODING_API_KEY=...           # or OPENROUTER_API_KEY
+CODING_MODEL=anthropic/claude-sonnet-4
+```
+
+Keys are read in `lib/provider-config.ts`, which is imported only by server code
+(`app/api/*`, `lib/planner-server.ts`, `lib/coding-agent.ts`). The browser
+receives a boolean and a model name, never a key, and no key ever appears in an
+API response, workflow history or error message. Do not prefix these variables
+with `NEXT_PUBLIC_`.
+
+Naming a provider without giving it a key is a configuration error, not a silent
+fall back to demo mode. Leaving both unset keeps the existing behaviour: the
+planner produces a labelled demo plan and the coding agent a labelled fixture
+proposal, with no network call.
+
+Failures are mapped to safe, provider-aware messages: authentication (401/403),
+unknown model (404), rate limit (429), provider outage (5xx), unreadable
+responses and timeouts. A failing configured provider is always reported as an
+error — it never falls back to a demo plan, a fixture, or another provider.
 
 ### API contract
 
