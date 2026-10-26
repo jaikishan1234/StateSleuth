@@ -117,14 +117,14 @@ const roadmap = [
   {
     phase: "Phase 2",
     title: "Testable demo",
-    status: "In progress" as const,
+    status: "Shipped" as const,
     body: "A real task board with create, rename, complete and delete, persisted in the browser.",
   },
   {
     phase: "Phase 3",
-    title: "Model integration",
-    status: "Planned" as const,
-    body: "Turn a change request into a verification plan: journeys, expectations and required state.",
+    title: "Feature planner",
+    status: "Shipped" as const,
+    body: "Describe a feature in plain English and get a verification-ready plan, from a live model or a clearly labelled demo.",
   },
   {
     phase: "Phase 4",
@@ -263,6 +263,12 @@ function Header() {
             </a>
           ))}
           <Link
+            href="/planner"
+            className="text-sm text-muted transition-colors hover:text-ink"
+          >
+            Planner
+          </Link>
+          <Link
             href="/demo"
             className="text-sm text-muted transition-colors hover:text-ink"
           >
@@ -333,7 +339,7 @@ export default function Home() {
                 </div>
 
                 <p className="mt-6 text-xs text-muted/80">
-                  Phase 2 · a real task board, deliberately imperfect.
+                  Phase 3 · a planner that speaks verification.
                 </p>
               </div>
 
@@ -672,12 +678,12 @@ export default function Home() {
                 Open the live demo
                 <ArrowRightIcon className="size-4" />
               </Link>
-              <a
-                href="#how-it-works"
+              <Link
+                href="/planner"
                 className="inline-flex items-center justify-center gap-2 rounded-full border border-hairline bg-surface px-5 py-3 text-sm font-medium text-ink transition-colors hover:border-white/20 hover:bg-elevated"
               >
-                Explore the verification loop
-              </a>
+                Plan a feature
+              </Link>
             </div>
           </div>
         </section>
@@ -696,7 +702,7 @@ export default function Home() {
             <span className="hidden text-white/15 sm:inline" aria-hidden="true">
               /
             </span>
-            <span>Phase 2 · testable demo</span>
+            <span>Phase 3 · feature planner</span>
           </div>
         </div>
       </footer>
