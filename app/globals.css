@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+@theme {
+  --color-canvas: #06080c;
+  --color-surface: #0a0e15;
+  --color-elevated: #10161f;
+  --color-hairline: #1b2431;
+  --color-verified: #34d399;
+  --color-attention: #f5b544;
+  --color-ink: #e7edf5;
+  --color-muted: #93a1b5;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background-color: color-mix(in srgb, var(--color-verified) 30%, transparent);
+  }
+
+  :focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--color-verified) 70%, transparent);
+    outline-offset: 3px;
+  }
+
+  section[id] {
+    scroll-margin-top: 6rem;
+  }
+}
+
+/* Subtle graph-paper backdrop that fades out toward the edges. */
+.grid-backdrop {
+  background-image:
+    linear-gradient(to right, rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148, 163, 184, 0.08) 1px, transparent 1px);
+  background-size: 64px 64px;
+  -webkit-mask-image: radial-gradient(ellipse 75% 55% at 50% 0%, #000 35%, transparent 100%);
+  mask-image: radial-gradient(ellipse 75% 55% at 50% 0%, #000 35%, transparent 100%);
+}
+
+/* Warm glow anchored behind the hero. */
+.hero-glow {
+  background:
+    radial-gradient(38rem 22rem at 22% 8%, rgba(52, 211, 153, 0.16), transparent 70%),
+    radial-gradient(34rem 20rem at 78% 0%, rgba(96, 165, 250, 0.14), transparent 72%);
+}
+
+.hairline-card {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.012)),
+    var(--color-surface);
+  border: 1px solid var(--color-hairline);
+  box-shadow:
+    0 1px 0 0 rgba(255, 255, 255, 0.04) inset,
+    0 24px 60px -40px rgba(0, 0, 0, 0.9);
+}
+
+.rise {
+  animation: rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-verified) 45%, transparent);
+  }
+  50% {
+    opacity: 0.65;
+    box-shadow: 0 0 0 5px transparent;
+  }
+}
+
+.live-dot {
+  animation: pulse-dot 2.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .rise,
+  .live-dot {
+    animation: none;
+  }
+}
