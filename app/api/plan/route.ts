@@ -81,13 +81,14 @@ export async function POST(request: Request) {
     return json({ error: result.error, detail: result.detail }, 502);
   }
 
-  if (result.value.mode === "demo") {
-    return json({
-      mode: "demo",
-      notice: result.value.notice,
-      plan: result.value.plan,
-    });
+  if (result.value.mode === "live") {
+    return json({ mode: "live", model: result.value.model, plan: result.value.plan });
   }
 
-  return json({ mode: "live", model: result.value.model, plan: result.value.plan });
+  // Demo and fixture plans are both generated locally and carry a notice.
+  return json({
+    mode: result.value.mode,
+    notice: result.value.notice,
+    plan: result.value.plan,
+  });
 }

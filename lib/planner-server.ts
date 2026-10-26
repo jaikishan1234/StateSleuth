@@ -11,27 +11,56 @@
 
 import {
   DEMO_NOTICE,
+  FIXTURE_PLAN_NOTICE,
   PLAN_SYSTEM_PROMPT,
   buildDemoPlan,
+  buildFixturePlan,
   parsePlanJson,
   validatePlan,
   type FeaturePlan,
   type PlanMode,
 } from "./planner.ts";
-import { getPlannerConfig, type PlannerConfig } from "./planner-config.ts";
+import { getPlannerConfig } from "./planner-config.ts";
 
 /** Unchanged from the Phase 3 implementation. */
 export const MODEL_TIMEOUT_MS = 45_000;
 
 export type PlanOutcome =
   | { mode: "live"; model: string; plan: FeaturePlan }
-  | { mode: "demo"; notice: string; plan: FeaturePlan };
+  | { mode: "demo"; notice: string; plan: FeaturePlan }
+  | { mode: "fixture"; notice: string; plan: FeaturePlan };
 
 export type PlanGenerationResult =
   | { ok: true; value: PlanOutcome }
   | { ok: false; error: string; detail?: string[] | string };
 
-async function requestPlan(config: PlannerConfig, feature: string): Promise<unknown> {
+async function requestPlan(feature: string): Promise<unknown> {
+  const content = await callChatCompletion(
+    PLAN_SYSTEM_PROMPT,
+    `Feature request:\n${feature}`,
+  );
+  return parsePlanJson(content);
+}
+
+/**
+ * Calls the configured chat completions endpoint and returns the raw text.
+ *
+ * Shared by the planner and the coding agent so both use the same model,
+ * timeout and request shape. The model id, base URL and timeout are unchanged.
+ *
+ * Throws on an upstream failure. The upstream body is never returned, so
+ * provider details and credentials cannot reach the browser.
+ */
+export async function callChatCompletion(
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<string> {
+  const config = getPlannerConfig();
+
+  if (!config.configured) {
+    throw new Error("No model credentials are configured.");
+  }
+
   const endpoint = `${config.baseUrl.replace(/\/+$/, "")}/chat/completions`;
 
   const response = await fetch(endpoint, {
@@ -44,8 +73,8 @@ async function requestPlan(config: PlannerConfig, feature: string): Promise<unkn
       model: config.model,
       temperature: 0.2,
       messages: [
-        { role: "system", content: PLAN_SYSTEM_PROMPT },
-        { role: "user", content: `Feature request:\n${feature}` },
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
       ],
       reasoning_effort: "low",
       max_tokens: 1600,
@@ -69,17 +98,33 @@ async function requestPlan(config: PlannerConfig, feature: string): Promise<unkn
     throw new Error("model response contained no text");
   }
 
-  return parsePlanJson(content);
+  return content;
 }
 
 /**
  * Produces a plan for a feature request.
  *
- * When no credentials are configured the result is a clearly labelled demo
- * plan. When credentials exist but the provider call fails, this returns a
- * failure: it never falls back to the demo plan.
+ * In explicit fixture mode a deterministic, clearly labelled test plan is
+ * returned and no provider call is made. Otherwise, when no credentials are
+ * configured the result is a clearly labelled demo plan. When credentials
+ * exist but the provider call fails, this returns a failure: it never falls
+ * back to a demo plan or a fixture.
  */
-export async function generatePlan(feature: string): Promise<PlanGenerationResult> {
+export async function generatePlan(
+  feature: string,
+  options: { fixture?: boolean } = {},
+): Promise<PlanGenerationResult> {
+  if (options.fixture === true) {
+    return {
+      ok: true,
+      value: {
+        mode: "fixture",
+        notice: FIXTURE_PLAN_NOTICE,
+        plan: buildFixturePlan(feature),
+      },
+    };
+  }
+
   const config = getPlannerConfig();
 
   if (!config.configured) {
@@ -90,7 +135,7 @@ export async function generatePlan(feature: string): Promise<PlanGenerationResul
   }
 
   try {
-    const result = await requestPlan(config, feature);
+    const result = await requestPlan(feature);
 
     if (typeof result === "object" && result !== null && "ok" in result) {
       const parsed = result as
@@ -130,8 +175,8 @@ export async function generatePlan(feature: string): Promise<PlanGenerationResul
     return {
       ok: false,
       error: timedOut
-        ? "The model request timed out. No demo plan was substituted."
-        : "The model request failed. No demo plan was substituted.",
+? "The model request timed out. No demo or fixture plan was substituted."
+      : "The model request failed. No demo or fixture plan was substituted.",
       detail: reason,
     };
   }

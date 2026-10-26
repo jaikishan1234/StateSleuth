@@ -17,6 +17,7 @@ type CopyState = "idle" | "copied" | "failed";
 
 function ModeChip({ mode, model }: { mode: PlanResponse["mode"]; model?: string }) {
   const live = mode === "live";
+  const fixture = mode === "fixture";
   return (
     <span
       className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[0.65rem] font-semibold uppercase tracking-widest ${
@@ -26,7 +27,11 @@ function ModeChip({ mode, model }: { mode: PlanResponse["mode"]; model?: string 
       }`}
     >
       <span className={`size-1.5 rounded-full ${live ? "bg-verified" : "bg-attention"}`} />
-      {live ? `Live model${model ? ` · ${model}` : ""}` : "Demo plan"}
+      {live
+        ? `Live model${model ? ` · ${model}` : ""}`
+        : fixture
+          ? "Test fixture"
+          : "Demo plan"}
     </span>
   );
 }
@@ -94,7 +99,7 @@ export function PlanResult({ result }: { result: PlanResponse }) {
           {plan.featureSummary.description}
         </p>
 
-        {notice && mode === "demo" && (
+        {notice && (mode === "demo" || mode === "fixture") && (
           <p className="mt-5 flex items-start gap-2 rounded-lg border border-attention/25 bg-attention/[0.07] px-3 py-2.5 text-xs leading-relaxed text-attention">
             <AlertIcon className="mt-0.5 size-3.5 shrink-0" />
             <span>{notice}</span>

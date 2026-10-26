@@ -9,10 +9,22 @@ import {
   LayersIcon,
   ShieldIcon,
   SparklesIcon,
+  TerminalIcon,
 } from "@/components/icons";
 import { PlanResult } from "@/components/planner/plan-result";
 import type { PlanResponse } from "@/lib/planner";
 import type { WorkflowStatus } from "@/lib/workflow";
+
+export type ProposalView = {
+  id: string;
+  source: "live" | "fixture";
+  model?: string;
+  explanation: string;
+  files: { path: string; change: "add" | "modify" | "delete"; summary: string }[];
+  diff: string;
+  createdAt: number;
+  notice?: string;
+};
 
 export type WorkflowView = {
   id: string;
@@ -20,10 +32,11 @@ export type WorkflowView = {
   status: WorkflowStatus;
   plan?: {
     id: string;
-    mode: "live" | "demo";
+    mode: "live" | "demo" | "fixture";
     generatedAt: number;
     plan: PlanResponse["plan"];
   };
+  proposal?: ProposalView;
   failure?: { code: string; message: string; at: number };
   createdAt: number;
   updatedAt: number;
@@ -85,6 +98,99 @@ function formatTime(at: number): string {
   }
 }
 
+function DiffView({ diff }: { diff: string }) {
+  return (
+    <pre className="max-h-96 overflow-auto rounded-lg border border-hairline bg-canvas/80 p-3 font-mono text-[0.7rem] leading-relaxed">
+      <code>
+        {diff.split("\n").map((line, index) => {
+          const tone = line.startsWith("+++") || line.startsWith("---")
+            ? "text-muted"
+            : line.startsWith("@@")
+              ? "text-[#7dd3fc]"
+              : line.startsWith("+")
+                ? "text-verified"
+                : line.startsWith("-")
+                  ? "text-red-300"
+                  : "text-ink/70";
+          return (
+            <span key={index} className={`block whitespace-pre ${tone}`}>
+              {line || " "}
+            </span>
+          );
+        })}
+      </code>
+    </pre>
+  );
+}
+
+function ProposalPanel({ proposal }: { proposal: ProposalView }) {
+  const isFixture = proposal.source === "fixture";
+
+  return (
+    <section className="hairline-card rounded-2xl p-5 sm:p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <TerminalIcon className="size-4 text-verified" />
+          <h2 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">
+            Code proposal
+          </h2>
+        </div>
+        <span
+          className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[0.65rem] font-semibold uppercase tracking-widest ${
+            isFixture
+              ? "border-attention/30 bg-attention/10 text-attention"
+              : "border-verified/30 bg-verified/10 text-verified"
+          }`}
+        >
+          <span className={`size-1.5 rounded-full ${isFixture ? "bg-attention" : "bg-verified"}`} />
+          {isFixture ? "Deterministic fixture" : `Live model${proposal.model ? ` · ${proposal.model}` : ""}`}
+        </span>
+      </div>
+
+      {proposal.notice && (
+        <p className="mt-4 flex items-start gap-2 rounded-lg border border-attention/25 bg-attention/[0.07] px-3 py-2.5 text-xs leading-relaxed text-attention">
+          <AlertIcon className="mt-0.5 size-3.5 shrink-0" />
+          <span>{proposal.notice}</span>
+        </p>
+      )}
+
+      <p className="mt-4 text-sm leading-relaxed text-ink/90">{proposal.explanation}</p>
+
+      <h3 className="mt-5 font-mono text-[0.65rem] uppercase tracking-widest text-muted">
+        Affected files ({proposal.files.length})
+      </h3>
+      <ul className="mt-2 space-y-1.5">
+        {proposal.files.map((file) => (
+          <li
+            key={file.path}
+            className="flex flex-col gap-1 rounded-lg border border-hairline bg-canvas/50 px-2.5 py-2 sm:flex-row sm:items-center sm:justify-between"
+          >
+            <code className="font-mono text-[0.72rem] text-ink">{file.path}</code>
+            <span className="text-[0.7rem] text-muted">
+              {file.change} · {file.summary}
+            </span>
+          </li>
+        ))}
+      </ul>
+
+      <h3 className="mt-5 font-mono text-[0.65rem] uppercase tracking-widest text-muted">
+        Proposed diff
+      </h3>
+      <div className="mt-2">
+        <DiffView diff={proposal.diff} />
+      </div>
+
+      <p className="mt-4 flex items-start gap-2 text-xs leading-relaxed text-muted">
+        <ShieldIcon className="mt-0.5 size-3.5 shrink-0" />
+        <span>
+          This diff has <strong className="text-ink">not</strong> been applied. No file was written
+          and no command was run. Code approval arrives in the next batch.
+        </span>
+      </p>
+    </section>
+  );
+}
+
 function readError(payload: unknown, fallback: string): string {
   if (typeof payload !== "object" || payload === null) return fallback;
   const record = payload as Record<string, unknown>;
@@ -98,7 +204,7 @@ export function WorkflowReview() {
   const [list, setList] = useState<WorkflowView[]>([]);
   const [feature, setFeature] = useState("");
   const [reason, setReason] = useState("");
-  const [pending, setPending] = useState<"create" | "approve" | "reject" | null>(null);
+  const [pending, setPending] = useState<"create" | "approve" | "reject" | "proposal" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showReject, setShowReject] = useState(false);
 
@@ -119,8 +225,7 @@ export function WorkflowReview() {
     void refreshList();
   }, [refreshList]);
 
-  async function handleCreate(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function handleCreate(useFixture: boolean) {
     if (pending) return;
     if (feature.trim().length < 12) {
       setError("Describe the feature in at least 12 characters.");
@@ -134,7 +239,7 @@ export function WorkflowReview() {
       const response = await fetch("/api/workflows", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ feature: feature.trim() }),
+        body: JSON.stringify({ feature: feature.trim(), fixture: useFixture }),
       });
 
       const payload: unknown = await response.json().catch(() => null);
@@ -230,12 +335,49 @@ export function WorkflowReview() {
     }
   }
 
+  async function handleRequestProposal(useFixture: boolean) {
+    if (!workflow || pending) return;
+
+    setPending("proposal");
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/workflows/${workflow.id}/proposal`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fixture: useFixture }),
+      });
+
+      const payload: unknown = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        setError(readError(payload, "The coding proposal could not be generated."));
+        return;
+      }
+
+      const updated = (payload as { workflow?: WorkflowView }).workflow;
+      if (updated) setWorkflow(updated);
+      await refreshList();
+    } catch {
+      setError("Could not reach the workflow API. Check your connection and try again.");
+    } finally {
+      setPending(null);
+    }
+  }
+
   const approvable = workflow?.status === "awaiting_plan_approval";
+  const canRequestProposal = workflow?.status === "coding";
   const busy = pending !== null;
 
   return (
     <div className="space-y-5">
-      <form onSubmit={handleCreate} className="hairline-card rounded-2xl p-4 sm:p-6">
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void handleCreate(false);
+        }}
+        className="hairline-card rounded-2xl p-4 sm:p-6"
+      >
         <label htmlFor="workflow-feature" className="text-sm font-semibold text-ink">
           Start a workflow
         </label>
@@ -252,7 +394,17 @@ export function WorkflowReview() {
           placeholder="e.g. Add due dates to tasks, highlight the overdue ones, and let me filter by them."
           className="mt-4 w-full resize-y rounded-xl border border-hairline bg-canvas/70 p-3.5 text-sm leading-relaxed text-ink transition-colors placeholder:text-muted/50 hover:border-white/15 focus:border-verified/50 focus:outline-none disabled:opacity-60"
         />
-        <div className="mt-3 flex justify-end">
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
+          <button
+            type="button"
+            onClick={() => void handleCreate(true)}
+            disabled={busy}
+            title="Create a workflow with a deterministic test plan instead of calling the model"
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-attention/30 bg-attention/10 px-4 text-sm font-medium text-attention transition-colors hover:bg-attention/15 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <AlertIcon className="size-4" />
+            Use test fixture
+          </button>
           <button
             type="submit"
             disabled={busy}
@@ -262,6 +414,10 @@ export function WorkflowReview() {
             {pending === "create" ? "Planning…" : "Create workflow"}
           </button>
         </div>
+        <p className="mt-2 text-right text-[0.7rem] leading-relaxed text-muted">
+          “Use test fixture” skips the model and builds a deterministic test plan, labelled as a
+          fixture. Nothing is generated by AI in that mode.
+        </p>
       </form>
 
       {error && (
@@ -369,15 +525,47 @@ export function WorkflowReview() {
               </form>
             )}
 
+            {canRequestProposal && (
+              <div className="mt-5 rounded-xl border border-hairline bg-canvas/50 p-4">
+                <p className="text-sm font-semibold text-ink">Request a code proposal</p>
+                <p className="mt-1 text-xs leading-relaxed text-muted">
+                  The coding agent uses the approved plan to propose a patch. The proposal is a
+                  reviewable diff only. Nothing is written to your source files.
+                </p>
+                <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                  <button
+                    type="button"
+                    onClick={() => handleRequestProposal(false)}
+                    disabled={busy}
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-verified px-4 text-sm font-semibold text-[#04110c] transition-colors hover:bg-[#4ade80] disabled:cursor-not-allowed disabled:bg-verified/30"
+                  >
+                    <TerminalIcon className="size-4" />
+                    {pending === "proposal" ? "Proposing…" : "Request proposal"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleRequestProposal(true)}
+                    disabled={busy}
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-hairline bg-surface px-4 text-sm font-medium text-ink transition-colors hover:border-white/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <AlertIcon className="size-4" />
+                    Use test fixture
+                  </button>
+                </div>
+              </div>
+            )}
+
             <p className="mt-4 flex items-start gap-2 text-xs leading-relaxed text-muted">
               <ShieldIcon className="mt-0.5 size-3.5 shrink-0" />
               <span>
                 Approving moves the workflow to <strong className="text-ink">coding</strong> and
-                records the approval. It does not run a coding agent, edit any files or verify
-                anything in this batch.
+                records the approval. From there you can request a proposal. No file is written
+                and nothing is verified in this batch.
               </span>
             </p>
           </section>
+
+          {workflow.proposal && <ProposalPanel proposal={workflow.proposal} />}
 
           {workflow.plan && (
             <PlanResult
@@ -386,9 +574,11 @@ export function WorkflowReview() {
                 model: undefined,
                 plan: workflow.plan.plan,
                 notice:
-                  workflow.plan.mode === "demo"
-                    ? "This workflow was planned in demo mode: no model credentials are configured, so the plan was generated locally from a sample template. No model was called."
-                    : undefined,
+                  workflow.plan.mode === "fixture"
+                    ? "Test fixture: this plan was generated deterministically by the local fixture. No model was called, and this plan is not AI-generated."
+                    : workflow.plan.mode === "demo"
+                      ? "This workflow was planned in demo mode: no model credentials are configured, so the plan was generated locally from a sample template. No model was called."
+                      : undefined,
               }}
             />
           )}

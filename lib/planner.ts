@@ -10,7 +10,7 @@ export const PLANNER_LIMITS = {
   featureMax: 2000,
 } as const;
 
-export type PlanMode = "live" | "demo";
+export type PlanMode = "live" | "demo" | "fixture";
 
 export type PlanStep = {
   title: string;
@@ -35,6 +35,9 @@ export type PlanResponse = {
 
 export const DEMO_NOTICE =
   "Demo mode: no model credentials are configured on this server, so this plan was generated locally from a sample template. No model was called.";
+
+export const FIXTURE_PLAN_NOTICE =
+  "Test fixture: this plan was generated deterministically by the local fixture, not by an AI model. It exists so the workflow can be exercised when the model provider is unavailable.";
 
 export const PLAN_SYSTEM_PROMPT = `You are the planning half of StateSleuth, a verification-first coding agent for small web applications.
 
@@ -285,13 +288,43 @@ export function buildDemoPlan(feature: string): FeaturePlan {
   };
 }
 
+/**
+ * Deterministic plan used when a workflow is explicitly created in fixture
+ * mode, or when no model credentials are configured.
+ *
+ * It is labelled as a test fixture: unlike the demo plan it does not claim the
+ * absence of credentials, because credentials may exist and simply not have
+ * been used.
+ */
+export function buildFixturePlan(feature: string): FeaturePlan {
+  const base = buildDemoPlan(feature);
+  const cleaned = feature.trim().replace(/\s+/g, " ");
+  const short = cleaned.length > 72 ? `${cleaned.slice(0, 69).trimEnd()}...` : cleaned;
+
+  return {
+    ...base,
+    featureSummary: {
+      ...base.featureSummary,
+      title: short.charAt(0).toUpperCase() + short.slice(1),
+      description: `Test fixture plan for "${cleaned}". Generated locally and deterministically: no model was called. This plan is not AI-generated.`,
+    },
+  };
+}
+
 export function planToMarkdown(plan: FeaturePlan, meta: { mode: PlanMode; model?: string }): string {
+  const source =
+    meta.mode === "live"
+      ? `live model${meta.model ? ` (${meta.model})` : ""}`
+      : meta.mode === "fixture"
+        ? "test fixture, generated locally (not an AI result)"
+        : "demo mode, generated locally";
+
   const lines: string[] = [];
   lines.push(`# ${plan.featureSummary.title}`);
   lines.push("");
   lines.push(plan.featureSummary.description);
   lines.push("");
-  lines.push(`_Source: ${meta.mode === "live" ? `live model${meta.model ? ` (${meta.model})` : ""}` : "demo mode, generated locally"}_`);
+  lines.push(`_Source: ${source}_`);
   lines.push("");
   lines.push("## Implementation steps");
   plan.implementationSteps.forEach((step, index) => {

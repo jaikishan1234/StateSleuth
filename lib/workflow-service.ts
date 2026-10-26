@@ -7,6 +7,8 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { requestProposal } from "./coding-agent.ts";
+import { isStoredProposal, type CodingProposal } from "./coding-proposal.ts";
 import { generatePlan, type PlanOutcome } from "./planner-server.ts";
 import { PLANNER_LIMITS, type FeaturePlan } from "./planner.ts";
 import {
@@ -35,6 +37,7 @@ export type WorkflowView = {
   featureRequest: string;
   status: Workflow["status"];
   plan?: WorkflowPlan;
+  proposal?: CodingProposal;
   failure?: WorkflowFailure;
   createdAt: number;
   updatedAt: number;
@@ -47,6 +50,7 @@ export function toWorkflowView(workflow: Workflow): WorkflowView {
     featureRequest: workflow.featureRequest,
     status: workflow.status,
     plan: workflow.plan,
+    proposal: workflow.proposal,
     failure: workflow.failure,
     createdAt: workflow.createdAt,
     updatedAt: workflow.updatedAt,
@@ -62,6 +66,11 @@ export type CreateWorkflowOptions = {
   feature: string;
   store?: WorkflowStore;
   now?: number;
+  /**
+   * Explicit fixture mode. Must be a boolean when supplied; anything else is
+   * rejected so a malformed request cannot silently look like normal mode.
+   */
+  fixture?: unknown;
 };
 
 /**
@@ -77,6 +86,16 @@ export async function startWorkflow(
   const store = options.store ?? getWorkflowStore();
   const now = options.now ?? Date.now();
   const feature = options.feature.trim();
+
+  if (options.fixture !== undefined && typeof options.fixture !== "boolean") {
+    return {
+      ok: false,
+      status: 400,
+      error: "The `fixture` option must be true or false.",
+    };
+  }
+
+  const useFixture = options.fixture === true;
 
   if (feature.length < PLANNER_LIMITS.featureMin) {
     return {
@@ -104,7 +123,7 @@ export async function startWorkflow(
     };
   }
 
-  const planning = await generatePlan(feature);
+  const planning = await generatePlan(feature, { fixture: useFixture });
 
   if (!planning.ok) {
     const failure = toSafeFailure(
@@ -205,6 +224,101 @@ export async function approveWorkflowPlan(
 
   await store.save(result.value);
   return { ok: true, value: toWorkflowView(result.value) };
+}
+
+export type RequestProposalOptions = {
+  id: string;
+  store?: WorkflowStore;
+  now?: number;
+  /** Forces the deterministic fixture. Used by tests and the demo. */
+  useFixture?: boolean;
+};
+
+/**
+ * Asks the coding agent for a proposal.
+ *
+ * Only a workflow in the `coding` state may request one. The proposal is
+ * stored with the workflow and the workflow moves to `awaiting_code_approval`,
+ * where a human reviews it. The patch is NOT applied: no source file is
+ * written, no shell command is run.
+ */
+export async function requestCodeProposal(
+  options: RequestProposalOptions,
+): Promise<ServiceResult<WorkflowView>> {
+  const store = options.store ?? getWorkflowStore();
+  const now = options.now ?? Date.now();
+
+  const workflow = await store.get(options.id);
+  if (!workflow) {
+    return { ok: false, status: 404, error: "No workflow with that id." };
+  }
+
+  if (workflow.status !== "coding") {
+    return {
+      ok: false,
+      status: 409,
+      error: `A coding proposal can only be requested while the workflow is in the coding state. This one is ${workflow.status}.`,
+    };
+  }
+
+  if (!workflow.plan) {
+    return {
+      ok: false,
+      status: 409,
+      error: "This workflow has no approved plan, so there is nothing to implement.",
+    };
+  }
+
+  const proposalId = `prop_${randomUUID()}`;
+
+  const result = await requestProposal({
+    featureRequest: workflow.featureRequest,
+    plan: workflow.plan.plan,
+    id: proposalId,
+    createdAt: now,
+    useFixture: options.useFixture,
+  });
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      status: 502,
+      error: result.error,
+      failure: {
+        code: "unexpected_error",
+        message: result.error,
+        at: now,
+      },
+    };
+  }
+
+  // Defence in depth: the domain refuses an invalid proposal too, but the
+  // service should never hand one over in the first place.
+  if (!isStoredProposal(result.proposal)) {
+    return {
+      ok: false,
+      status: 500,
+      error: "The generated proposal was not valid, so it was not attached.",
+    };
+  }
+
+  const moved = transition(workflow, "awaiting_code_approval", {
+    actor: "coding_agent",
+    at: now,
+    proposal: result.proposal,
+  });
+
+  if (!moved.ok) {
+    return {
+      ok: false,
+      status: 409,
+      error: moved.failure.message,
+      failure: moved.failure,
+    };
+  }
+
+  await store.save(moved.value);
+  return { ok: true, value: toWorkflowView(moved.value) };
 }
 
 export type RejectOptions = {

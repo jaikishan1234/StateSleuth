@@ -7,7 +7,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --test tests/workflow.test.ts tests/workflow-store.test.ts",
+    "test": "node --test tests/workflow.test.ts tests/workflow-store.test.ts tests/coding-proposal.test.ts tests/workflow-fixture.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

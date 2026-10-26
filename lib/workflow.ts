@@ -11,6 +11,7 @@
  * stops at an approval gate, and a human may reject the run at any point.
  */
 
+import { isStoredProposal, type CodingProposal } from "./coding-proposal.ts";
 import type { FeaturePlan, PlanMode } from "./planner.ts";
 
 /** Every state a workflow can occupy. */
@@ -80,6 +81,9 @@ export type WorkflowFailureCode =
   | "unknown_status"
   | "plan_required"
   | "plan_not_permitted"
+  | "proposal_required"
+  | "proposal_invalid"
+  | "proposal_not_permitted"
   | "unexpected_error";
 
 /**
@@ -116,6 +120,8 @@ export type Workflow = {
   featureRequest: string;
   status: WorkflowStatus;
   plan?: WorkflowPlan;
+  /** A reviewable coding proposal, attached by the coding agent. */
+  proposal?: CodingProposal;
   failure?: WorkflowFailure;
   createdAt: number;
   updatedAt: number;
@@ -265,6 +271,8 @@ export type TransitionOptions = {
   note?: string;
   /** May only be supplied when moving to `awaiting_plan_approval`. */
   plan?: WorkflowPlan;
+  /** May only be supplied when moving to `awaiting_code_approval`. */
+  proposal?: CodingProposal;
   /** May only be supplied when moving to `failed`. */
   failure?: WorkflowFailure;
 };
@@ -336,7 +344,19 @@ export function transition(
     };
   }
 
+  if (options.proposal && to !== "awaiting_code_approval") {
+    return {
+      ok: false,
+      failure: {
+        code: "proposal_not_permitted",
+        message: `A proposal may only be attached when moving to awaiting_code_approval, not ${to}.`,
+        at,
+      },
+    };
+  }
+
   const plan = options.plan ?? workflow.plan;
+  const proposal = options.proposal ?? workflow.proposal;
 
   if ((PLAN_REQUIRED_STATUSES as readonly WorkflowStatus[]).includes(to) && !plan) {
     return {
@@ -347,6 +367,33 @@ export function transition(
         at,
       },
     };
+  }
+
+  // A workflow may only wait for code approval, or begin verification, once a
+  // valid proposal exists. The proposal is merged above, so it counts whether
+  // it was supplied with this transition or already stored on the workflow.
+  if (to === "awaiting_code_approval" || to === "verifying") {
+    if (!proposal) {
+      return {
+        ok: false,
+        failure: {
+          code: "proposal_required",
+          message: `Moving to ${to} requires a coding proposal.`,
+          at,
+        },
+      };
+    }
+
+    if (!isStoredProposal(proposal)) {
+      return {
+        ok: false,
+        failure: {
+          code: "proposal_invalid",
+          message: "The coding proposal attached to this workflow is not valid.",
+          at,
+        },
+      };
+    }
   }
 
   const failure =
@@ -362,6 +409,7 @@ export function transition(
     ...workflow,
     status: to,
     plan,
+    proposal,
     failure,
     updatedAt: at,
     history: [

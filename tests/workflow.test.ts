@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { buildFixtureProposal } from "../lib/coding-proposal.ts";
 import type { FeaturePlan } from "../lib/planner.ts";
 import {
   ALLOWED_TRANSITIONS,
@@ -46,6 +47,13 @@ const SAMPLE_WORKFLOW_PLAN: WorkflowPlan = {
   generatedAt: 1_000,
   plan: SAMPLE_PLAN,
 };
+
+/** A valid proposal, required before entering awaiting_code_approval. */
+const SAMPLE_PROPOSAL = buildFixtureProposal({
+  id: "prop_1",
+  createdAt: 4_000,
+  featureRequest: "Add due dates to tasks",
+});
 
 function unwrap<T>(result: WorkflowResult<T>): T {
   if (!result.ok) {
@@ -164,6 +172,7 @@ describe("valid transitions", () => {
       transition(workflow, "awaiting_code_approval", {
         actor: "coding_agent",
         at: 4_000,
+        proposal: SAMPLE_PROPOSAL,
       }),
     );
     assert.equal(workflow.status, "awaiting_code_approval");
@@ -202,7 +211,11 @@ describe("valid transitions", () => {
     let workflow = workflowWithPlan();
     workflow = unwrap(approvePlan(workflow, { at: 3_000 }));
     workflow = unwrap(
-      transition(workflow, "awaiting_code_approval", { actor: "coding_agent", at: 4_000 }),
+      transition(workflow, "awaiting_code_approval", {
+        actor: "coding_agent",
+        at: 4_000,
+        proposal: SAMPLE_PROPOSAL,
+      }),
     );
     assert.equal(workflow.plan?.id, "plan_1");
     assert.equal(workflow.plan?.plan.featureSummary.title, "Due dates on tasks");
@@ -257,7 +270,11 @@ describe("invalid transitions", () => {
     const terminal = unwrap(
       transition(
         unwrap(
-          transition(passed, "awaiting_code_approval", { actor: "coding_agent", at: 4_000 }),
+          transition(passed, "awaiting_code_approval", {
+            actor: "coding_agent",
+            at: 4_000,
+            proposal: SAMPLE_PROPOSAL,
+          }),
         ),
         "verifying",
         { actor: "human", at: 5_000 },
@@ -357,7 +374,11 @@ describe("rejection paths", () => {
     let workflow = workflowWithPlan();
     workflow = unwrap(approvePlan(workflow, { at: 3_000 }));
     workflow = unwrap(
-      transition(workflow, "awaiting_code_approval", { actor: "coding_agent", at: 4_000 }),
+      transition(workflow, "awaiting_code_approval", {
+        actor: "coding_agent",
+        at: 4_000,
+        proposal: SAMPLE_PROPOSAL,
+      }),
     );
     const rejected = unwrap(
       rejectWorkflow(workflow, "The patch does not touch the persistence layer", {
@@ -396,6 +417,98 @@ describe("rejection paths", () => {
     assert.equal(failed.failure?.code, "unexpected_error");
     assert.equal(failed.failure?.message, failure.message);
     assert.equal(failed.failure?.at, 9_000);
+  });
+});
+
+describe("code approval gate requires a valid proposal", () => {
+  function atCoding(): Workflow {
+    let workflow = workflowWithPlan();
+    workflow = unwrap(approvePlan(workflow, { at: 3_000 }));
+    return workflow;
+  }
+
+  it("rejects the transition when no proposal exists", () => {
+    const result = transition(atCoding(), "awaiting_code_approval", {
+      actor: "coding_agent",
+      at: 4_000,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.failure.code, "proposal_required");
+  });
+
+  it("rejects a malformed proposal supplied with the transition", () => {
+    const result = transition(atCoding(), "awaiting_code_approval", {
+      actor: "coding_agent",
+      at: 4_000,
+      proposal: { id: "prop_bad", source: "fixture" } as unknown as typeof SAMPLE_PROPOSAL,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.failure.code, "proposal_invalid");
+  });
+
+  it("rejects a malformed proposal already stored on the workflow", () => {
+    const workflow = {
+      ...atCoding(),
+      proposal: { id: "prop_bad" },
+    } as unknown as Workflow;
+    const result = transition(workflow, "awaiting_code_approval", {
+      actor: "coding_agent",
+      at: 4_000,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.failure.code, "proposal_invalid");
+  });
+
+  it("rejects a proposal whose diff names a blocked path", () => {
+    const sneaky = {
+      ...SAMPLE_PROPOSAL,
+      diff: "--- a/.env.local\n+++ b/.env.local\n@@ -1 +1 @@\n+SECRET=1\n",
+    };
+    const result = transition(atCoding(), "awaiting_code_approval", {
+      actor: "coding_agent",
+      at: 4_000,
+      proposal: sneaky,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.failure.code, "proposal_invalid");
+  });
+
+  it("rejects a proposal whose file list is not on the allowlist", () => {
+    const sneaky = {
+      ...SAMPLE_PROPOSAL,
+      files: [{ path: "secrets/keys.ts", change: "add", summary: "Add keys." }],
+    } as unknown as typeof SAMPLE_PROPOSAL;
+    const result = transition(atCoding(), "awaiting_code_approval", {
+      actor: "coding_agent",
+      at: 4_000,
+      proposal: sneaky,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.failure.code, "proposal_invalid");
+  });
+
+  it("accepts a valid proposal and attaches it to the workflow", () => {
+    const result = transition(atCoding(), "awaiting_code_approval", {
+      actor: "coding_agent",
+      at: 4_000,
+      proposal: SAMPLE_PROPOSAL,
+    });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.value.status, "awaiting_code_approval");
+    assert.equal(result.value.proposal?.id, "prop_1");
+    assert.equal(result.value.proposal?.source, "fixture");
+  });
+
+  it("accepts a valid proposal already stored on the workflow", () => {
+    const workflow = { ...atCoding(), proposal: SAMPLE_PROPOSAL };
+    const result = transition(workflow, "awaiting_code_approval", {
+      actor: "coding_agent",
+      at: 4_000,
+    });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.value.proposal?.id, "prop_1");
   });
 });
 
