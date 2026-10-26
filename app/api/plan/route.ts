@@ -62,6 +62,8 @@ async function requestPlan(config: PlannerConfig, feature: string): Promise<unkn
         { role: "system", content: PLAN_SYSTEM_PROMPT },
         { role: "user", content: `Feature request:\n${feature}` },
       ],
+      reasoning_effort: "low",
+      max_tokens: 1600,
     }),
     signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
     cache: "no-store",
