@@ -6,6 +6,7 @@ import {
   AlertIcon,
   CheckIcon,
   CrossIcon,
+  CursorIcon,
   LayersIcon,
   ShieldIcon,
   SparklesIcon,
@@ -26,6 +27,24 @@ export type ProposalView = {
   notice?: string;
 };
 
+export type VerificationView = {
+  verdict: "passed" | "failed";
+  expected: string;
+  observed: string;
+  steps: {
+    id: string;
+    label: string;
+    expected: string;
+    observed: string;
+    passed: boolean;
+    detail?: string;
+  }[];
+  url: string;
+  checkedAt: number;
+  durationMs: number;
+  screenshot?: string;
+};
+
 export type WorkflowView = {
   id: string;
   featureRequest: string;
@@ -37,6 +56,7 @@ export type WorkflowView = {
     plan: PlanResponse["plan"];
   };
   proposal?: ProposalView;
+  verification?: VerificationView;
   failure?: { code: string; message: string; at: number };
   createdAt: number;
   updatedAt: number;
@@ -197,6 +217,124 @@ function ProposalPanel({ proposal, diffOpen = true }: { proposal: ProposalView; 
   );
 }
 
+function VerificationPanel({
+  verification,
+  workflowId,
+}: {
+  verification: VerificationView;
+  workflowId: string;
+}) {
+  const failed = verification.verdict === "failed";
+  const failedCount = verification.steps.filter((step) => !step.passed).length;
+
+  return (
+    <section className="hairline-card rounded-2xl p-5 sm:p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <CursorIcon className="size-4 text-verified" />
+          <h2 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">
+            Verification verdict
+          </h2>
+        </div>
+        <span
+          className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[0.65rem] font-semibold uppercase tracking-widest ${
+            failed
+              ? "border-red-500/30 bg-red-500/10 text-red-300"
+              : "border-verified/30 bg-verified/10 text-verified"
+          }`}
+        >
+          <span className={`size-1.5 rounded-full ${failed ? "bg-red-400" : "bg-verified"}`} />
+          {failed
+            ? `Failed · ${failedCount} of ${verification.steps.length} checks`
+            : `Passed · ${verification.steps.length} checks`}
+        </span>
+      </div>
+
+      <p className="mt-4 text-sm leading-relaxed text-ink/90">
+        Driven in a real browser at{" "}
+        <code className="font-mono text-[0.72rem]">{verification.url}</code>, {formatTime(verification.checkedAt)}{" "}
+        ({Math.round(verification.durationMs / 100) / 10}s). Read-only: no code was applied and no
+        source file was written.
+      </p>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <div className="rounded-lg border border-hairline bg-canvas/50 p-3">
+          <p className="font-mono text-[0.6rem] uppercase tracking-widest text-muted">Expected</p>
+          <p className="mt-1.5 text-xs leading-relaxed text-ink/90">{verification.expected}</p>
+        </div>
+        <div
+          className={`rounded-lg border p-3 ${
+            failed ? "border-red-500/30 bg-red-500/[0.06]" : "border-verified/25 bg-verified/[0.05]"
+          }`}
+        >
+          <p className="font-mono text-[0.6rem] uppercase tracking-widest text-muted">Observed</p>
+          <p className="mt-1.5 text-xs leading-relaxed text-ink/90">{verification.observed}</p>
+        </div>
+      </div>
+
+      <h3 className="mt-5 font-mono text-[0.65rem] uppercase tracking-widest text-muted">
+        Verification steps ({verification.steps.length})
+      </h3>
+      <ol className="mt-2 space-y-2">
+        {verification.steps.map((step) => (
+          <li
+            key={step.id}
+            className={`rounded-lg border px-3 py-2.5 ${
+              step.passed ? "border-hairline bg-canvas/40" : "border-red-500/30 bg-red-500/[0.06]"
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              {step.passed ? (
+                <CheckIcon className="mt-0.5 size-3.5 shrink-0 text-verified" />
+              ) : (
+                <CrossIcon className="mt-0.5 size-3.5 shrink-0 text-red-400" />
+              )}
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-ink">{step.label}</p>
+                <p className="mt-1 text-xs leading-relaxed text-muted">
+                  <span className="uppercase tracking-wide text-muted/70">expected </span>
+                  {step.expected}
+                </p>
+                <p className="mt-0.5 text-xs leading-relaxed text-ink/90">
+                  <span className="uppercase tracking-wide text-muted/70">observed </span>
+                  {step.observed}
+                </p>
+                {step.detail && (
+                  <p className="mt-1 break-all rounded border border-hairline bg-canvas/60 px-2 py-1 font-mono text-[0.62rem] leading-relaxed text-muted">
+                    {step.detail}
+                  </p>
+                )}
+              </div>
+            </div>
+          </li>
+        ))}
+      </ol>
+
+      {verification.screenshot ? (
+        <>
+          <h3 className="mt-5 font-mono text-[0.65rem] uppercase tracking-widest text-muted">
+            Evidence screenshot
+          </h3>
+          <div className="mt-2 overflow-hidden rounded-lg border border-hairline bg-canvas/60">
+            {/* Local-only route; the file name comes from the stored record. */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={`/api/workflows/${workflowId}/evidence?v=${verification.checkedAt}`}
+              alt="Browser screenshot captured by the verification run"
+              className="w-full"
+            />
+          </div>
+          <p className="mt-1.5 font-mono text-[0.65rem] text-muted">{verification.screenshot}</p>
+        </>
+      ) : (
+        <p className="mt-5 rounded-lg border border-hairline bg-canvas/60 px-3 py-3 text-xs text-muted">
+          No screenshot was captured for this run.
+        </p>
+      )}
+    </section>
+  );
+}
+
 function readError(payload: unknown, fallback: string): string {
   if (typeof payload !== "object" || payload === null) return fallback;
   const record = payload as Record<string, unknown>;
@@ -211,7 +349,7 @@ export function WorkflowReview() {
   const [feature, setFeature] = useState("");
   const [reason, setReason] = useState("");
   const [pending, setPending] = useState<
-    "create" | "approve" | "reject" | "proposal" | "code-approve" | "code-reject" | null
+    "create" | "approve" | "reject" | "proposal" | "code-approve" | "code-reject" | "verify" | null
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [showReject, setShowReject] = useState(false);
@@ -381,6 +519,35 @@ export function WorkflowReview() {
     }
   }
 
+  async function handleVerify() {
+    if (!workflow || pending) return;
+
+    setPending("verify");
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/workflows/${workflow.id}/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+
+      const payload: unknown = await response.json().catch(() => null);
+      if (!response.ok) {
+        setError(readError(payload, "The verification run could not be completed."));
+        return;
+      }
+
+      const updated = (payload as { workflow?: WorkflowView }).workflow;
+      if (updated) setWorkflow(updated);
+      await refreshList();
+    } catch {
+      setError("Could not reach the workflow API. Check your connection and try again.");
+    } finally {
+      setPending(null);
+    }
+  }
+
   async function handleApproveCode() {
     if (!workflow || pending) return;
     if (!confirmApply) {
@@ -478,6 +645,8 @@ export function WorkflowReview() {
 
   const approvable = workflow?.status === "awaiting_plan_approval";
   const canRequestProposal = workflow?.status === "coding";
+  const canVerify =
+    workflow?.status === "awaiting_code_approval" || workflow?.status === "verifying";
   const awaitingCode = workflow?.status === "awaiting_code_approval";
   const appliedNote =
     workflow?.status === "verifying"
@@ -708,8 +877,47 @@ export function WorkflowReview() {
             </p>
           </section>
 
+          {canVerify && (
+            <section className="rounded-xl border border-verified/25 bg-verified/[0.04] p-4 sm:p-5">
+              <div className="flex items-center gap-2.5">
+                <CursorIcon className="size-4 text-verified" />
+                <h2 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">
+                  Browser verification
+                </h2>
+              </div>
+              <p className="mt-3 text-sm leading-relaxed text-ink/90">
+                Opens <code className="font-mono text-[0.72rem]">/demo</code> in Chrome, drives the
+                task board like a person, and records expected versus observed with a screenshot.
+                The verdict decides this workflow&apos;s final state.
+              </p>
+              <p className="mt-2 text-xs leading-relaxed text-muted">
+                This does not approve the proposal, does not apply the patch and does not write any
+                source file. Running it is an alternative to applying the change, not a step after
+                it.
+              </p>
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={() => void handleVerify()}
+                  disabled={busy}
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-verified px-4 text-sm font-semibold text-[#04110c] transition-colors hover:bg-[#4ade80] disabled:cursor-not-allowed disabled:bg-verified/30 disabled:text-[#04110c]/50"
+                >
+                  <CursorIcon className="size-4" />
+                  {pending === "verify" ? "Verifying in Chrome…" : "Run verification"}
+                </button>
+              </div>
+            </section>
+          )}
+
           {workflow.proposal && (
             <ProposalPanel proposal={workflow.proposal} diffOpen={diffOpen} />
+          )}
+
+          {workflow.verification && (
+            <VerificationPanel
+              verification={workflow.verification}
+              workflowId={workflow.id}
+            />
           )}
 
           {awaitingCode && workflow.proposal && (
@@ -835,8 +1043,8 @@ export function WorkflowReview() {
                     {appliedNote.replace(/^Applied /, "")}
                   </p>
                   <p className="mt-2 text-xs leading-relaxed text-muted">
-                    The workflow is now in <strong className="text-ink">verifying</strong>. Browser
-                    verification is not implemented yet.
+                    The workflow is now in <strong className="text-ink">verifying</strong>. Run
+                    browser verification from this page to record a verdict.
                   </p>
                 </div>
               </div>

@@ -42,7 +42,12 @@ function normalizeHostname(raw: string): string {
   return value;
 }
 
-function isLoopbackHostname(raw: string): boolean {
+/**
+ * True when a hostname (with or without a port, or bracketed IPv6) is
+ * loopback. Exported so the verification runner can apply the same rule to the
+ * origin it is asked to drive.
+ */
+export function isLoopbackHostname(raw: string): boolean {
   const hostname = normalizeHostname(raw);
   if (hostname.length === 0) return false;
   if (LOOPBACK_HOSTNAMES.has(hostname)) return true;

@@ -22,7 +22,14 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import path from "node:path";
 import type { Workflow } from "./workflow.ts";
 
-export const DEFAULT_WORKFLOW_DIR = path.join(process.cwd(), ".data", "workflows");
+/**
+ * Where workflow records are written.
+ *
+ * `STATESLEUTH_WORKFLOW_DIR` lets a throwaway server (or a browser test) keep
+ * its records out of the project's own `.data/workflows` directory.
+ */
+export const DEFAULT_WORKFLOW_DIR =
+  process.env.STATESLEUTH_WORKFLOW_DIR?.trim() || path.join(process.cwd(), ".data", "workflows");
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 

@@ -23,7 +23,18 @@ import {
   type WorkflowFailure,
   type WorkflowPlan,
   type WorkflowResult,
+  type WorkflowStatus,
 } from "./workflow.ts";
+import { evidenceDir } from "./verification-evidence.ts";
+import {
+  VERIFICATION_LIMITS,
+  VerificationError,
+  countFailedAssertions,
+  loopbackBaseUrl,
+  verdictFromAssertions,
+  type VerificationResult,
+} from "./verification.ts";
+import type { VerificationRunner } from "./verification-browser.ts";
 import { getWorkflowStore, type WorkflowStore } from "./workflow-store.ts";
 
 export type ServiceResult<T> =
@@ -47,8 +58,10 @@ export type WorkflowView = {
   id: string;
   featureRequest: string;
   status: Workflow["status"];
-  plan?: WorkflowPlan;
+plan?: WorkflowPlan;
   proposal?: CodingProposal;
+  /** Evidence from the latest verification run, if one has been recorded. */
+  verification?: VerificationResult;
   failure?: WorkflowFailure;
   createdAt: number;
   updatedAt: number;
@@ -60,8 +73,9 @@ export function toWorkflowView(workflow: Workflow): WorkflowView {
     id: workflow.id,
     featureRequest: workflow.featureRequest,
     status: workflow.status,
-    plan: workflow.plan,
+plan: workflow.plan,
     proposal: workflow.proposal,
+    verification: workflow.verification,
     failure: workflow.failure,
     createdAt: workflow.createdAt,
     updatedAt: workflow.updatedAt,
@@ -614,7 +628,7 @@ export async function rejectCodeProposal(
     return {
       ok: false,
       status: 409,
-      error: `Code can only be rejected while the workflow is awaiting code approval. This one is ${workflow.status}.`,
+error: `Code can only be rejected while the workflow is awaiting code approval. This one is ${workflow.status}.`,
     };
   }
 
@@ -630,4 +644,176 @@ export async function rejectCodeProposal(
 
   await store.save(result.value);
   return { ok: true, value: toWorkflowView(result.value) };
+}
+
+export type RunVerificationOptions = {
+  id: string;
+  /** Loopback origin of the running app. Never supplied by a client. */
+  baseUrl: string;
+  store?: WorkflowStore;
+  now?: number;
+  evidenceDir?: string;
+  /** Test seam: replaces the Playwright journey with a stub. */
+  runner?: VerificationRunner;
+};
+
+/** States a verification run may start from. */
+function canBeVerified(status: WorkflowStatus): boolean {
+  return status === "awaiting_code_approval" || status === "verifying";
+}
+
+/** Loads Playwright lazily, so no other workflow route pulls it in. */
+async function loadBrowserRunner(): Promise<VerificationRunner> {
+  const module = await import("./verification-browser.ts");
+  return module.runDemoJourney;
+}
+
+/**
+ * Runs the browser verification journey and records the verdict.
+ *
+ * This never approves or applies a code proposal, never writes a source file
+ * and never runs a shell command: it drives the running app in Chrome and reads
+ * what it sees. A run may only start from a state where a proposal exists
+ * (`awaiting_code_approval` or `verifying`), and it records its outcome through
+ * the domain, so a `passed` verdict is only possible when every check passed.
+ */
+export async function runWorkflowVerification(
+  options: RunVerificationOptions,
+): Promise<ServiceResult<WorkflowView>> {
+  const store = options.store ?? getWorkflowStore();
+  const now = options.now ?? Date.now();
+
+  const workflow = await store.get(options.id);
+  if (!workflow) {
+    return { ok: false, status: 404, error: "No workflow with that id." };
+  }
+
+  if (!canBeVerified(workflow.status)) {
+    return {
+      ok: false,
+      status: 409,
+      error: `Verification runs while a workflow is awaiting code approval or already verifying. This one is ${workflow.status}.`,
+    };
+  }
+
+  if (!workflow.proposal || !isStoredProposal(workflow.proposal)) {
+    return {
+      ok: false,
+      status: 409,
+      error: "This workflow has no valid coding proposal, so there is nothing to verify.",
+    };
+  }
+
+  let origin: string;
+  try {
+    origin = loopbackBaseUrl(options.baseUrl);
+  } catch (error) {
+    return {
+      ok: false,
+      status: 400,
+      error:
+        error instanceof VerificationError
+          ? error.message
+          : "The verification origin is not usable.",
+    };
+  }
+
+  const runId = `verify_${randomUUID()}`;
+  const directory = options.evidenceDir ?? evidenceDir();
+
+  let journey: Awaited<ReturnType<VerificationRunner>>;
+  try {
+    const runner = options.runner ?? (await loadBrowserRunner());
+    journey = await runner({ baseUrl: origin, runId, evidenceDir: directory, now });
+  } catch (error) {
+    // An environment failure is not evidence about the app, so no verdict is
+    // recorded and the workflow stays where it was.
+    const message =
+      error instanceof VerificationError
+        ? error.message
+        : "The verification run could not be completed.";
+    console.error(`[verification] run failed: ${message}`);
+    return { ok: false, status: 502, error: message };
+  }
+
+  const steps = journey.assertions.slice(0, VERIFICATION_LIMITS.stepCountMax);
+  if (steps.length === 0) {
+    return {
+      ok: false,
+      status: 502,
+      error: "The verification run produced no observations, so no verdict was recorded.",
+    };
+  }
+
+  const result: VerificationResult = {
+    verdict: verdictFromAssertions(steps),
+    expected: journey.expected,
+    observed: journey.observed,
+    steps,
+    url: journey.url,
+    checkedAt: now,
+    durationMs: journey.durationMs,
+    ...(journey.screenshot ? { screenshot: journey.screenshot } : {}),
+  };
+
+  // Starting verification is the only transition a run makes on its own, and
+  // the transition table already allows it. No patch is applied on this path.
+  let current = workflow;
+  if (current.status === "awaiting_code_approval") {
+    const entered = transition(current, "verifying", {
+      actor: "verification_agent",
+      at: now,
+      note: "Browser verification started; no code was applied.",
+    });
+    if (!entered.ok) {
+      return { ok: false, status: 409, error: entered.failure.message, failure: entered.failure };
+    }
+    current = entered.value;
+  }
+
+  const failedCount = countFailedAssertions(steps);
+  const settled =
+    result.verdict === "passed"
+      ? transition(current, "passed", {
+          actor: "verification_agent",
+          at: now,
+          verification: result,
+          note: sanitizeMessage(
+            `Browser verification passed: ${steps.length} of ${steps.length} checks matched.`,
+          ),
+        })
+      : transition(current, "failed", {
+          actor: "verification_agent",
+          at: now,
+          verification: result,
+          failure: {
+            code: "verification_failed",
+            message: sanitizeMessage(
+              `Browser verification failed: ${failedCount} of ${steps.length} checks did not match. ${result.observed}`,
+            ),
+            at: now,
+          },
+          note: sanitizeMessage(
+            `Evidence: ${journey.screenshot ?? "no screenshot was captured"}`,
+          ),
+        });
+
+  if (!settled.ok) {
+    return { ok: false, status: 409, error: settled.failure.message, failure: settled.failure };
+  }
+
+  try {
+    await store.save(settled.value);
+  } catch {
+    // No source file was written, so a failed save is safely retryable.
+    console.error("[verification] the verdict could not be saved");
+    return {
+      ok: false,
+      status: 500,
+      error:
+        "Verification finished but the workflow could not be saved. No source file was changed, so you can run it again.",
+    };
+  }
+
+  return { ok: true, value: toWorkflowView(settled.value) };
 }

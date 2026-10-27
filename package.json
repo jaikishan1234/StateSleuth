@@ -9,7 +9,8 @@
     "build": "next build",
     "start": "next start",
     "start:local": "next start -H 127.0.0.1",
-    "test": "node --test tests/workflow.test.ts tests/workflow-store.test.ts tests/coding-proposal.test.ts tests/workflow-fixture.test.ts tests/code-application.test.ts tests/hardening.test.ts tests/providers.test.ts",
+    "test": "node --test tests/workflow.test.ts tests/workflow-store.test.ts tests/coding-proposal.test.ts tests/workflow-fixture.test.ts tests/code-application.test.ts tests/hardening.test.ts tests/providers.test.ts tests/verification.test.ts",
+    "test:browser": "playwright test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -18,6 +19,7 @@
     "react-dom": "19.3.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@tailwindcss/postcss": "4.3.3",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.2",

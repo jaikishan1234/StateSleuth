@@ -13,6 +13,7 @@
 
 import { isStoredProposal, type CodingProposal } from "./coding-proposal.ts";
 import type { FeaturePlan, PlanMode } from "./planner.ts";
+import { isStoredVerification, type VerificationResult } from "./verification.ts";
 
 /** Every state a workflow can occupy. */
 export const WORKFLOW_STATUSES = [
@@ -84,6 +85,10 @@ export type WorkflowFailureCode =
   | "proposal_required"
   | "proposal_invalid"
   | "proposal_not_permitted"
+  | "verification_required"
+  | "verification_invalid"
+  | "verification_not_permitted"
+  | "verification_failed"
   | "unexpected_error";
 
 /**
@@ -122,6 +127,8 @@ export type Workflow = {
   plan?: WorkflowPlan;
   /** A reviewable coding proposal, attached by the coding agent. */
   proposal?: CodingProposal;
+  /** Evidence recorded by a verification run, attached by the verifier. */
+  verification?: VerificationResult;
   failure?: WorkflowFailure;
   createdAt: number;
   updatedAt: number;
@@ -273,6 +280,11 @@ export type TransitionOptions = {
   plan?: WorkflowPlan;
   /** May only be supplied when moving to `awaiting_code_approval`. */
   proposal?: CodingProposal;
+  /**
+   * May only be supplied when moving to `passed` or `failed`. A `passed`
+   * transition additionally requires a result whose every step passed.
+   */
+  verification?: VerificationResult;
   /** May only be supplied when moving to `failed`. */
   failure?: WorkflowFailure;
 };
@@ -357,6 +369,29 @@ export function transition(
 
   const plan = options.plan ?? workflow.plan;
   const proposal = options.proposal ?? workflow.proposal;
+  const verification = options.verification ?? workflow.verification;
+
+  if (options.verification && to !== "passed" && to !== "failed") {
+    return {
+      ok: false,
+      failure: {
+        code: "verification_not_permitted",
+        message: `A verification result may only be recorded when moving to passed or failed, not ${to}.`,
+        at,
+      },
+    };
+  }
+
+  if (verification !== undefined && !isStoredVerification(verification)) {
+    return {
+      ok: false,
+      failure: {
+        code: "verification_invalid",
+        message: "The verification result attached to this workflow is not valid.",
+        at,
+      },
+    };
+  }
 
   if ((PLAN_REQUIRED_STATUSES as readonly WorkflowStatus[]).includes(to) && !plan) {
     return {
@@ -396,6 +431,23 @@ export function transition(
     }
   }
 
+  // A verdict may only claim a pass when every recorded check passed. This is
+  // the domain half of the guarantee; verdictFromAssertions is the runner half,
+  // and neither trusts the other. A transition that carries no verdict is
+  // unchanged from before this feature, and the verifier always attaches one.
+  if (to === "passed" && verification !== undefined) {
+    if (verification.verdict !== "passed" || !verification.steps.every((step) => step.passed)) {
+      return {
+        ok: false,
+        failure: {
+          code: "verification_required",
+          message: "A passing verdict requires every verification check to have passed.",
+          at,
+        },
+      };
+    }
+  }
+
   const failure =
     to === "failed"
       ? (options.failure ?? {
@@ -410,6 +462,7 @@ export function transition(
     status: to,
     plan,
     proposal,
+    verification,
     failure,
     updatedAt: at,
     history: [
