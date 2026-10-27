@@ -17,6 +17,21 @@ export type AgentName = "planner" | "coding";
 
 export const DEFAULT_PROVIDER: ProviderId = "gemini";
 
+/**
+ * Output-token budgets, per agent.
+ *
+ * A plan is a short structured document; a unified diff can be long. The two
+ * agents are configured independently, so their budgets are independent too.
+ * Override with PLANNER_MAX_OUTPUT_TOKENS / CODING_MAX_OUTPUT_TOKENS.
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS: Record<AgentName, number> = {
+  planner: 1_600,
+  coding: 4_000,
+};
+
+/** Accepted range for a configured output budget. */
+export const OUTPUT_TOKEN_LIMITS = { min: 256, max: 16_000 } as const;
+
 export type ProviderDefaults = {
   baseUrl: string;
   model: string;
@@ -51,11 +66,13 @@ export type ProviderErrorCode =
   | "missing_credentials"
   | "invalid_base_url"
   | "invalid_model"
+  | "invalid_output_limit"
   | "auth"
   | "not_found"
   | "rate_limit"
   | "unavailable"
   | "timeout"
+  | "truncated"
   | "bad_response"
   | "request_failed";
 
@@ -80,6 +97,11 @@ export type ResolvedProvider = {
   apiKey?: string;
   configured: boolean;
   providerHost: string;
+  /**
+   * Output-token budget for this agent. Optional so a hand-built config still
+   * type-checks; `buildChatRequest` then falls back to the agent default.
+   */
+  maxOutputTokens?: number;
 };
 
 export type ProviderResolution =
@@ -172,6 +194,26 @@ export function resolveProviderConfig(agent: AgentName): ProviderResolution {
     };
   }
 
+  let maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS[agent];
+  const outputRaw = readEnv(`${prefix}_MAX_OUTPUT_TOKENS`);
+  if (outputRaw.length > 0) {
+    const parsed = Number(outputRaw);
+    if (
+      !Number.isInteger(parsed) ||
+      parsed < OUTPUT_TOKEN_LIMITS.min ||
+      parsed > OUTPUT_TOKEN_LIMITS.max
+    ) {
+      return {
+        ok: false,
+        error: new ProviderError(
+          "invalid_output_limit",
+          `${prefix}_MAX_OUTPUT_TOKENS for the ${agent} agent must be a whole number between ${OUTPUT_TOKEN_LIMITS.min} and ${OUTPUT_TOKEN_LIMITS.max}.`,
+        ),
+      };
+    }
+    maxOutputTokens = parsed;
+  }
+
   const apiKey =
     readEnv(`${prefix}_API_KEY`) ||
     defaults.keyEnv.map(readEnv).find((value) => value.length > 0) ||
@@ -198,6 +240,7 @@ export function resolveProviderConfig(agent: AgentName): ProviderResolution {
       ...(apiKey.length > 0 ? { apiKey } : {}),
       configured: apiKey.length > 0,
       providerHost: parsed.host,
+      maxOutputTokens,
     },
   };
 }
@@ -211,10 +254,10 @@ export type ChatRequest = {
 /**
  * Builds the chat-completions request for a resolved provider.
  *
- * Gemini keeps the exact request shape the planner already used
- * (`reasoning_effort: "low"`, `max_tokens: 1600`). Groq and OpenRouter receive
- * the same output bound but no `reasoning_effort`, which is not part of their
- * shared dialect.
+ * Gemini keeps the `reasoning_effort: "low"` setting the planner used; Groq and
+ * OpenRouter do not accept that field, so it is omitted for them. The output
+ * bound comes from the agent's budget (planner 1600 by default, coding 4000),
+ * never from the provider.
  */
 export function buildChatRequest(
   config: ResolvedProvider,
@@ -235,7 +278,7 @@ export function buildChatRequest(
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
     ],
-    max_tokens: 1600,
+    max_tokens: config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS[config.agent],
   };
 
   if (config.provider === "gemini") {

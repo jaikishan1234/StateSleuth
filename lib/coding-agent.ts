@@ -9,7 +9,7 @@
 
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { PERMITTED_SOURCE_FILES } from "./coding-paths.ts";
+import { CONTEXT_FILE_LIMIT, selectContextFiles } from "./coding-context.ts";
 import {
   buildFixtureProposal,
   validateProposal,
@@ -17,15 +17,13 @@ import {
   type ProposalSource,
 } from "./coding-proposal.ts";
 import { callChatCompletion } from "./planner-server.ts";
+import { parseUnifiedDiff } from "./patch-apply.ts";
 import { ProviderError, resolveProviderConfig } from "./provider-config.ts";
 import type { FeaturePlan } from "./planner.ts";
 import { extractJsonObject } from "./planner.ts";
 
 /** Maximum bytes read from any one permitted file. */
 const MAX_FILE_BYTES = 24_000;
-
-/** Maximum number of permitted files included in the model prompt. */
-const MAX_CONTEXT_FILES = 6;
 
 export const CODING_SYSTEM_PROMPT = `You are the coding half of StateSleuth, a verification-first coding agent.
 
@@ -40,10 +38,23 @@ Return ONLY a JSON object, with no markdown fences and no commentary, in exactly
 
 Rules:
 - The diff MUST be a valid unified diff using "--- a/<path>" and "+++ b/<path>" headers and "@@" hunks.
+- Every hunk MUST start with a complete header carrying real line numbers and counts, in exactly this form: "@@ -10,3 +10,4 @@". Never write a bare "@@", never omit the numbers or counts, and never merge separate changes into one hunk.
+- The hunk counts MUST match the body: every unchanged context line starts with a space, every addition with "+", every removal with "-". Include the unchanged lines around a change; do not invent or drop them.
+- Before returning, recount each hunk: oldCount = context lines + removed lines, newCount = context lines + added lines. If the counts do not match the body, fix the header.
+- Emit the complete diff. Do not elide ranges, do not write "...", and do not put commentary, markers or notes (for example "*** End of File ***") anywhere inside the diff.
 - Only propose changes to files that appear in the provided context. Never invent new paths.
 - Make the smallest change that satisfies the plan. Do not reformat unrelated code.
 - Do not include secrets, API keys, credentials or environment files.
-- The diff is a PROPOSAL for human review. Never claim it has been applied or tested.`;
+- Return the JSON object and nothing else: no prose, no markdown fences, no explanation outside the "explanation" field. The diff is a PROPOSAL for human review: never claim it has been applied or tested.
+
+Example of the only accepted diff shape (note the header numbers and that context lines begin with a single space):
+--- a/lib/tasks.ts
++++ b/lib/tasks.ts
+@@ -4,3 +4,4 @@
+   id: string,
++  source?: string,
+   title: string,
+   completed: boolean,`;
 
 export type ProposalRequest = {
   featureRequest: string;
@@ -68,20 +79,21 @@ export type PermittedFileContent = {
 };
 
 /**
- * Reads the permitted source files for context.
+ * Reads the context files for a feature request.
  *
- * Only files on the allowlist are opened. A read failure is skipped rather
- * than fatal, so a missing file cannot break proposal generation.
+ * The request selects which allowlisted files are worth sending; see
+ * lib/coding-context.ts. Selection only narrows the prompt, never the edit
+ * allowlist. A read failure is skipped rather than fatal, so a missing file
+ * cannot break proposal generation.
  */
 export async function readPermittedSources(
   projectRoot: string = process.cwd(),
-  limit: number = MAX_CONTEXT_FILES,
+  featureRequest: string = "",
+  limit: number = CONTEXT_FILE_LIMIT,
 ): Promise<PermittedFileContent[]> {
   const contents: PermittedFileContent[] = [];
 
-  for (const relative of PERMITTED_SOURCE_FILES) {
-    if (contents.length >= limit) break;
-
+  for (const relative of selectContextFiles(featureRequest, limit)) {
     // turbopackIgnore: the path is a fixed relative file inside the project,
     // not a project-wide trace.
     const absolute = path.join(/* turbopackIgnore: true */ projectRoot, relative);
@@ -176,7 +188,7 @@ export async function requestProposal(
 
   let completion: Awaited<ReturnType<typeof callChatCompletion>>;
   try {
-    const sources = await readPermittedSources(request.projectRoot);
+    const sources = await readPermittedSources(request.projectRoot, request.featureRequest);
     completion = await callChatCompletion(
       "coding",
       CODING_SYSTEM_PROMPT,
@@ -193,9 +205,11 @@ export async function requestProposal(
     return {
       ok: false,
       error:
-        providerError.code === "timeout"
-          ? "The coding request timed out. No fixture proposal was substituted."
-          : `The coding request failed (${providerError.code}). No fixture proposal was substituted.`,
+        providerError.code === "truncated"
+          ? "The coding response was cut off at the output-token limit, so no complete diff was produced. Raise CODING_MAX_OUTPUT_TOKENS or ask for a smaller change. No fixture proposal was substituted."
+          : providerError.code === "timeout"
+            ? "The coding request timed out. No fixture proposal was substituted."
+            : `The coding request failed (${providerError.code}). No fixture proposal was substituted.`,
       issues: [providerError.message],
     };
   }
@@ -223,6 +237,20 @@ export async function requestProposal(
       ok: false,
       error: "The model returned a proposal that failed validation.",
       issues: validated.issues,
+    };
+  }
+
+  // The shape check above is deliberately broad; the applier's parser is the
+  // authority on whether a diff is complete. Run it here so a malformed live
+  // diff is an explicit error now, rather than a stored proposal that fails
+  // later at approval time. The parser itself is unchanged and stays strict.
+  const syntax = parseUnifiedDiff(validated.proposal.diff);
+  if (!syntax.ok) {
+    console.error(`[coding] proposal diff is malformed: ${syntax.message}`);
+    return {
+      ok: false,
+      error: "The model returned a diff that is not a complete unified diff.",
+      issues: [syntax.message],
     };
   }
 

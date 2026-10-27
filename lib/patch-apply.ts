@@ -20,6 +20,13 @@ import { lstat, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { checkRelativePath, isPermittedSourceFile } from "./coding-paths.ts";
 import { isStoredProposal, type CodingProposal } from "./coding-proposal.ts";
+import { parseUnifiedDiff, type Hunk, type Section } from "./unified-diff.ts";
+
+// The parser lives in lib/unified-diff.ts so proposal validation can share it
+// without importing this module (which touches the filesystem). Re-exported for
+// existing callers.
+export { parseUnifiedDiff };
+export type { Hunk, Section };
 
 export type ApplyFailureCode =
   | "invalid_proposal"
@@ -42,16 +49,6 @@ export type ApplyResult =
   | { ok: true; applied: string[] }
   | { ok: false; failure: ApplyFailure; applied: string[]; rolledBack: boolean };
 
-type Hunk = {
-  oldStart: number;
-  oldCount: number;
-  newStart: number;
-  newCount: number;
-  lines: string[];
-};
-
-type Section = { path: string; hunks: Hunk[] };
-
 export function sha256(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
@@ -73,93 +70,6 @@ function fail(code: ApplyFailureCode, message: string, filePath?: string): Apply
   };
 }
 
-/** Parses a unified diff into per-file hunks. Rejects anything unexpected. */
-export function parseUnifiedDiff(
-  diff: string,
-): { ok: true; sections: Section[] } | { ok: false; message: string } {
-  const lines = diff.split(/\r?\n/);
-  const sections: Section[] = [];
-
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index] ?? "";
-
-    if (line.startsWith("--- ")) {
-      const next = lines[index + 1] ?? "";
-      if (!next.startsWith("+++ ")) {
-        return { ok: false, message: "a diff section is missing its +++ header" };
-      }
-
-      const newPath = next.slice(4).trim();
-      if (newPath === "/dev/null") {
-        return { ok: false, message: "file creation and deletion are not supported" };
-      }
-
-      const normalized = newPath.replace(/^b\//, "");
-      sections.push({ path: normalized, hunks: [] });
-      index += 2;
-      continue;
-    }
-
-    if (line.startsWith("@@")) {
-      const section = sections.at(-1);
-      if (!section) return { ok: false, message: "a hunk appears before any file header" };
-
-      const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
-      if (!match) return { ok: false, message: "a hunk header is malformed" };
-
-      const hunk: Hunk = {
-        oldStart: Number(match[1]),
-        oldCount: match[2] === undefined ? 1 : Number(match[2]),
-        newStart: Number(match[3]),
-        newCount: match[4] === undefined ? 1 : Number(match[4]),
-        lines: [],
-      };
-
-      index += 1;
-      while (index < lines.length) {
-        const bodyLine = lines[index] ?? "";
-
-        // A new hunk or a new file section ends this hunk. The file-header
-        // check matters because "--- " also starts with the "-" tag.
-        if (bodyLine.startsWith("@@")) break;
-        if (bodyLine.startsWith("--- ") && (lines[index + 1] ?? "").startsWith("+++ ")) break;
-
-        const tag = bodyLine.charAt(0);
-        if (tag === " " || tag === "+" || tag === "-" || tag === "\\") {
-          hunk.lines.push(bodyLine);
-          index += 1;
-          continue;
-        }
-        break;
-      }
-
-      const oldLines = hunk.lines.filter((entry) => entry.startsWith(" ") || entry.startsWith("-")).length;
-      const newLines = hunk.lines.filter((entry) => entry.startsWith(" ") || entry.startsWith("+")).length;
-
-      if (oldLines !== hunk.oldCount || newLines !== hunk.newCount) {
-        return { ok: false, message: "a hunk's line counts do not match its header" };
-      }
-
-      section.hunks.push(hunk);
-      continue;
-    }
-
-    if (line === "" || line.startsWith("\\")) {
-      index += 1;
-      continue;
-    }
-
-    return { ok: false, message: "the diff contains a line that is not part of a hunk" };
-  }
-
-  if (sections.length === 0) return { ok: false, message: "the diff contains no file sections" };
-  if (sections.some((section) => section.hunks.length === 0)) {
-    return { ok: false, message: "a diff section contains no hunks" };
-  }
-
-  return { ok: true, sections };
-}
 
 function matchesAt(lines: string[], position: number, hunk: Hunk): boolean {
   let cursor = position;

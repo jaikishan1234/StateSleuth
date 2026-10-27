@@ -7,6 +7,7 @@
  */
 
 import { checkRelativePath, isPermittedSourceFile } from "./coding-paths.ts";
+import { parseUnifiedDiff } from "./unified-diff.ts";
 
 /** Where a proposal came from. `fixture` is never an AI result. */
 export type ProposalSource = "live" | "fixture";
@@ -82,9 +83,22 @@ export function diffHeaderPaths(diff: string): string[] {
   return [...new Set(paths)];
 }
 
-/** True when the diff looks like a unified diff. */
+/**
+ * A hunk header must carry real line numbers and counts, exactly as
+ * `parseUnifiedDiff` requires. A bare "@@" is not a usable hunk.
+ */
+const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m;
+
+/**
+ * True when the diff looks like a unified diff.
+ *
+ * This mirrors the parser's hunk-header rule rather than being more lenient, so
+ * a malformed header is rejected while the proposal is generated instead of
+ * being stored and failing later at apply time. The parser itself is unchanged
+ * and remains the authority.
+ */
 export function looksLikeUnifiedDiff(diff: string): boolean {
-  return /^(---|\+\+\+)\s/m.test(diff) && /^@@\s/m.test(diff);
+  return /^(---|\+\+\+)\s/m.test(diff) && HUNK_HEADER.test(diff);
 }
 
 /**
@@ -206,7 +220,12 @@ export function isStoredProposal(value: unknown): value is CodingProposal {
   if (!explanation) return false;
 
   const diff = readText(candidate.diff, PROPOSAL_LIMITS.diffMax);
-  if (!diff || !looksLikeUnifiedDiff(diff)) return false;
+  if (!diff) return false;
+
+  // Parse the stored bytes, not the trimmed copy: a unified diff may end with a
+  // whitespace-only context line, and trimming would delete it and change the
+  // hunk counts. readText above has already proved this is a bounded string.
+  if (!parseUnifiedDiff(candidate.diff as string).ok) return false;
 
   if (
     !Array.isArray(candidate.files) ||

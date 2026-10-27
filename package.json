@@ -9,7 +9,7 @@
     "build": "next build",
     "start": "next start",
     "start:local": "next start -H 127.0.0.1",
-    "test": "node --test tests/workflow.test.ts tests/workflow-store.test.ts tests/coding-proposal.test.ts tests/workflow-fixture.test.ts tests/code-application.test.ts tests/hardening.test.ts tests/providers.test.ts tests/verification.test.ts",
+    "test": "node --test tests/workflow.test.ts tests/workflow-store.test.ts tests/coding-proposal.test.ts tests/workflow-fixture.test.ts tests/code-application.test.ts tests/hardening.test.ts tests/providers.test.ts tests/verification.test.ts tests/coding-context.test.ts tests/output-budget.test.ts tests/diff-format.test.ts",
     "test:browser": "playwright test",
     "typecheck": "tsc --noEmit"
   },

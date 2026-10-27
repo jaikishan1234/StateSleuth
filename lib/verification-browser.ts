@@ -40,11 +40,20 @@ export const CHROME_CHANNEL = "chrome";
 
 const STEP_TIMEOUT_MS = 15_000;
 const SETTLE_TIMEOUT_MS = 5_000;
+/** A cold server can take a while before the board becomes interactive. */
+const HYDRATION_TIMEOUT_MS = 30_000;
 
 const TASK_TITLE = "Verify rename keeps completion";
 const RENAMED_TITLE = "Verify rename keeps completion (renamed)";
 
-const TASK_INPUT_PLACEHOLDER = "What needs to happen?";
+/** Accessible names from components/demo/task-board.tsx. */
+const TASK_INPUT_LABEL = "Task title";
+const ADD_TASK_BUTTON = "Add task";
+const EDIT_TASK_INPUT_LABEL = "Edit task title";
+
+/** Rendered only after hydration, when a fresh board has no tasks. */
+const EMPTY_BOARD_TITLE = "No tasks yet";
+
 /** The board's accessible completion counter. */
 const COUNTER_SELECTOR = 'p[aria-live="polite"]';
 const COUNTER_COMPLETE = "1 of 1 tasks complete.";
@@ -127,8 +136,38 @@ async function check(
   }
 }
 
-function allPassed(steps: readonly VerificationAssertion[]): boolean {
-  return steps.every((step) => step.passed);
+/**
+ * Runs one setup step. Setup steps are preconditions for the defect under
+ * test, not the defect itself: if the board cannot be prepared, the journey
+ * stops and reports an infrastructure failure, so the workflow records no
+ * verdict instead of blaming the application for a harness problem.
+ */
+async function setupStep(
+  steps: VerificationAssertion[],
+  id: string,
+  label: string,
+  expected: string,
+  run: () => Promise<Observation>,
+): Promise<void> {
+  let observation: Observation;
+  try {
+    observation = await run();
+  } catch (error) {
+    if (error instanceof VerificationError) throw error;
+    throw new VerificationError(
+      "journey_failed",
+      `Verification setup failed: ${label.toLowerCase()} — ${describeError(error)}. No verdict was recorded.`,
+    );
+  }
+
+  if (!observation.passed) {
+    throw new VerificationError(
+      "journey_failed",
+      `Verification setup failed: ${label.toLowerCase()} — ${observation.observed}. No verdict was recorded.`,
+    );
+  }
+
+  steps.push(toAssertion(id, label, expected, observation));
 }
 
 async function counterText(page: Page): Promise<string> {
@@ -216,137 +255,149 @@ export async function runDemoJourney(options: JourneyRunOptions): Promise<Journe
 
     await page.goto(url, { waitUntil: "domcontentloaded" });
 
-    await check(
+    // The board is server-rendered, so its controls exist before React has
+    // attached. Interacting in that window is silently dropped, which leaves an
+    // empty board. The empty-state heading only renders once the board has
+    // hydrated, so it is the signal that the controls are actually live.
+    await setupStep(
       steps,
       "board-ready",
       "The demo board loads",
-      `the add-task control is visible at ${DEMO_PATH}`,
+      `the board is interactive and empty at ${DEMO_PATH}`,
       async () => {
-        await page.getByPlaceholder(TASK_INPUT_PLACEHOLDER).waitFor({ state: "visible" });
-        return { observed: "the add-task control is visible", passed: true };
+        try {
+          await page
+            .getByText(EMPTY_BOARD_TITLE, { exact: true })
+            .waitFor({ state: "visible", timeout: HYDRATION_TIMEOUT_MS });
+        } catch {
+          throw new VerificationError(
+            "journey_failed",
+            "The demo board did not become interactive, so it could not be driven.",
+          );
+        }
+        return { observed: "the board hydrated and showed an empty task list", passed: true };
       },
     );
 
-    // Everything below depends on a usable board. When it did not load, the
-    // run stops here and the single failed observation is the evidence.
-    if (allPassed(steps)) {
-      await check(
-        steps,
-        "task-created",
-        "A task can be created",
-        `1 task titled "${TASK_TITLE}"`,
-        async () => {
-          await page.getByPlaceholder(TASK_INPUT_PLACEHOLDER).fill(TASK_TITLE);
-          await page.getByPlaceholder(TASK_INPUT_PLACEHOLDER).press("Enter");
-          await page.getByText(TASK_TITLE, { exact: true }).waitFor({ state: "visible" });
-          const rows = await page.getByRole("checkbox").count();
-          return {
-            observed: rows === 1 ? `1 task row, titled "${TASK_TITLE}"` : `${rows} task rows`,
-            passed: rows === 1,
-          };
-        },
-      );
+    await setupStep(
+      steps,
+      "task-created",
+      "A task can be created",
+      `1 task titled "${TASK_TITLE}"`,
+      async () => {
+        await page.getByLabel(TASK_INPUT_LABEL, { exact: true }).fill(TASK_TITLE);
+        // Clicking (rather than pressing Enter) waits for the button to become
+        // enabled, which only happens once React has taken the typed value.
+        await page.getByRole("button", { name: ADD_TASK_BUTTON, exact: true }).click();
+        await page.getByText(TASK_TITLE, { exact: true }).waitFor({ state: "visible" });
+        const rows = await page.getByRole("checkbox").count();
+        return {
+          observed: rows === 1 ? `1 task row, titled "${TASK_TITLE}"` : `${rows} task rows`,
+          passed: rows === 1,
+        };
+      },
+    );
 
-      await check(
-        steps,
-        "marked-complete",
-        "A task can be marked complete",
-        `the checkbox is checked and the board reads "${COUNTER_COMPLETE}"`,
-        async () => {
-          await page.getByRole("checkbox").first().click();
-          const counter = await settleCounter(page, COUNTER_COMPLETE);
-          const checked = await checkboxChecked(page);
-          return {
-            observed: `the checkbox is ${checked ? "checked" : "unchecked"} and the board reads "${counter}"`,
-            passed: checked && counter === COUNTER_COMPLETE,
-          };
-        },
-      );
+    await setupStep(
+      steps,
+      "marked-complete",
+      "A task can be marked complete",
+      `the checkbox is checked and the board reads "${COUNTER_COMPLETE}"`,
+      async () => {
+        await page
+          .getByRole("checkbox", { name: `Mark "${TASK_TITLE}" as complete`, exact: true })
+          .click();
+        const counter = await settleCounter(page, COUNTER_COMPLETE);
+        const checked = await checkboxChecked(page);
+        return {
+          observed: `the checkbox is ${checked ? "checked" : "unchecked"} and the board reads "${counter}"`,
+          passed: checked && counter === COUNTER_COMPLETE,
+        };
+      },
+    );
 
-      await check(
-        steps,
-        "renamed",
-        "The task can be renamed",
-        `the row reads "${RENAMED_TITLE}"`,
-        async () => {
-          await page.getByRole("button", { name: `Edit "${TASK_TITLE}"` }).click();
-          await page.locator('input[id^="edit-"]').fill(RENAMED_TITLE);
-          await page.getByRole("button", { name: "Save" }).click();
-          await page.getByText(RENAMED_TITLE, { exact: true }).waitFor({ state: "visible" });
-          return { observed: `the row reads "${RENAMED_TITLE}"`, passed: true };
-        },
-      );
+    await setupStep(
+      steps,
+      "renamed",
+      "The task can be renamed",
+      `the row reads "${RENAMED_TITLE}"`,
+      async () => {
+        await page.getByRole("button", { name: `Edit "${TASK_TITLE}"`, exact: true }).click();
+        await page.getByLabel(EDIT_TASK_INPUT_LABEL, { exact: true }).fill(RENAMED_TITLE);
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await page.getByText(RENAMED_TITLE, { exact: true }).waitFor({ state: "visible" });
+        return { observed: `the row reads "${RENAMED_TITLE}"`, passed: true };
+      },
+    );
 
-      await check(
-        steps,
-        "rename-keeps-completion",
-        "Renaming a completed task keeps it complete",
-        "the checkbox is still checked after the rename",
-        async () => {
-          const checked = await checkboxChecked(page);
-          return {
-            observed: `the checkbox is ${checked ? "still checked" : "unchecked"} after the rename`,
-            passed: checked,
-          };
-        },
-      );
+    // From here the assertions describe the application, not the harness: this
+    // is the behaviour under test, and a mismatch is a genuine failed verdict.
+    await check(
+      steps,
+      "rename-keeps-completion",
+      "Renaming a completed task keeps it complete",
+      "the checkbox is still checked after the rename",
+      async () => {
+        const checked = await checkboxChecked(page);
+        return {
+          observed: `the checkbox is ${checked ? "still checked" : "unchecked"} after the rename`,
+          passed: checked,
+        };
+      },
+    );
 
-      await check(
-        steps,
-        "rename-keeps-counter",
-        "Renaming a completed task keeps the completion count",
-        `the board still reads "${COUNTER_COMPLETE}"`,
-        async () => {
-          const counter = await counterText(page);
-          return { observed: `the board reads "${counter}"`, passed: counter === COUNTER_COMPLETE };
-        },
-      );
+    await check(
+      steps,
+      "rename-keeps-counter",
+      "Renaming a completed task keeps the completion count",
+      `the board still reads "${COUNTER_COMPLETE}"`,
+      async () => {
+        const counter = await counterText(page);
+        return { observed: `the board reads "${counter}"`, passed: counter === COUNTER_COMPLETE };
+      },
+    );
 
-      await check(
-        steps,
-        "completion-persists",
-        "Completion survives a reload",
-        `the renamed task is still complete in ${TASKS_STORAGE_KEY} after a reload`,
-        async () => {
-          await page.reload({ waitUntil: "domcontentloaded" });
-          await page.getByText(RENAMED_TITLE, { exact: true }).waitFor({ state: "visible" });
-          const { raw, tasks } = await readStoredTasks(page);
-          const stored = tasks.find(
-            (entry) =>
-              typeof entry === "object" &&
-              entry !== null &&
-              (entry as { title?: unknown }).title === RENAMED_TITLE,
-          ) as { completed?: unknown } | undefined;
-          return {
-            observed: `the reloaded board reports completed = ${String(stored?.completed)}`,
-            passed: stored?.completed === true,
-            detail: `localStorage["${TASKS_STORAGE_KEY}"] = ${raw ?? CLEAN_BOARD}`,
-          };
-        },
-      );
-    }
-
+    // Evidence for the state immediately after the rename attempt, while the
+    // outcome is on screen, rather than a later state or an empty board.
     await mkdir(options.evidenceDir, { recursive: true });
     await page.screenshot({
       path: path.join(options.evidenceDir, evidenceName),
       fullPage: true,
     });
     screenshot = evidenceName;
+
+    await check(
+      steps,
+      "completion-persists",
+      "Completion survives a reload",
+      `the renamed task is still complete in ${TASKS_STORAGE_KEY} after a reload`,
+      async () => {
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.getByText(RENAMED_TITLE, { exact: true }).waitFor({ state: "visible" });
+        const { raw, tasks } = await readStoredTasks(page);
+        const stored = tasks.find(
+          (entry) =>
+            typeof entry === "object" &&
+            entry !== null &&
+            (entry as { title?: unknown }).title === RENAMED_TITLE,
+        ) as { completed?: unknown } | undefined;
+        return {
+          observed: `the reloaded board reports completed = ${String(stored?.completed)}`,
+          passed: stored?.completed === true,
+          detail: `localStorage["${TASKS_STORAGE_KEY}"] = ${raw ?? CLEAN_BOARD}`,
+        };
+      },
+    );
   } catch (error) {
-    // An unexpected failure still yields evidence: whatever was observed.
-    console.error(`[verification] journey aborted: ${describeError(error)}`);
-    steps.push(
-      toAssertion("journey-completed", "The verification journey completed", "every check ran", {
-        observed: `the journey stopped early: ${describeError(error)}`,
-        passed: false,
-      }),
+    // A journey that could not complete is an infrastructure problem, not
+    // evidence about the application: surface it so no verdict is recorded.
+    if (error instanceof VerificationError) throw error;
+    throw new VerificationError(
+      "journey_failed",
+      `The verification journey stopped unexpectedly: ${describeError(error)}. No verdict was recorded.`,
     );
   } finally {
     await browser.close().catch(() => {});
-  }
-
-  if (steps.length === 0) {
-    throw new VerificationError("journey_failed", "The verification run produced no observations.");
   }
 
   const failed = countFailedAssertions(steps);

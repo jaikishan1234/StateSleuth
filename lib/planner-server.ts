@@ -99,8 +99,21 @@ export async function callChatCompletion(
     throw new ProviderError("bad_response", `The ${config.provider} API returned an unreadable response.`);
   }
 
-  const content = (payload as { choices?: { message?: { content?: unknown } }[] })?.choices?.[0]
-    ?.message?.content;
+  const choice = (payload as {
+    choices?: { message?: { content?: unknown }; finish_reason?: unknown }[];
+  })?.choices?.[0];
+
+  // A response cut off at the output-token limit is not a usable answer: the
+  // JSON or diff will be incomplete, so fail loudly rather than hand a
+  // truncated document to the parser.
+  if (choice?.finish_reason === "length") {
+    throw new ProviderError(
+      "truncated",
+      `The ${config.provider} response reached its output-token limit before finishing.`,
+    );
+  }
+
+  const content = choice?.message?.content;
 
   if (typeof content !== "string" || content.trim().length === 0) {
     throw new ProviderError("bad_response", `The ${config.provider} API returned no text.`);
