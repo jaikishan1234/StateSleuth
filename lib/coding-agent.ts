@@ -17,7 +17,7 @@ import {
   type ProposalSource,
 } from "./coding-proposal.ts";
 import { callChatCompletion } from "./planner-server.ts";
-import { parseUnifiedDiff } from "./patch-apply.ts";
+import { HUNK_COUNT_MISMATCH, parseUnifiedDiff } from "./unified-diff.ts";
 import { ProviderError, resolveProviderConfig } from "./provider-config.ts";
 import type { FeaturePlan } from "./planner.ts";
 import { extractJsonObject } from "./planner.ts";
@@ -156,6 +156,140 @@ function buildUserPrompt(
   return lines.join("\n");
 }
 
+type AttemptResult =
+  | { ok: true; proposal: CodingProposal }
+  | {
+      ok: false;
+      kind: "provider" | "unreadable" | "validation" | "diff";
+      error: string;
+      issues?: string[];
+      /** Parser message, when the failure was the strict diff parse. */
+      reason?: string;
+    };
+
+/**
+ * Strips control characters and caps length. The parser messages are our own
+ * fixed literals, so this is defence in depth rather than a sanitisation of
+ * model output.
+ */
+function sanitizeReason(reason: string): string {
+  return reason
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+}
+
+function providerFailureMessage(error: ProviderError): string {
+  if (error.code === "truncated") {
+    return "The coding response was cut off at the output-token limit, so no complete diff was produced. Raise CODING_MAX_OUTPUT_TOKENS or ask for a smaller change. No fixture proposal was substituted.";
+  }
+  if (error.code === "timeout") {
+    return "The coding request timed out. No fixture proposal was substituted.";
+  }
+  return `The coding request failed (${error.code}). No fixture proposal was substituted.`;
+}
+
+/**
+ * The single corrective instruction used for the one retry. It names the
+ * parser's reason and restates the counting rule, without suggesting that the
+ * diff may be partial or approximate.
+ */
+function buildCorrectionPrompt(reason: string): string {
+  return [
+    "## Correction required",
+    `Your previous answer was rejected by the strict diff validator: ${reason}.`,
+    "Return the same proposal again, corrected.",
+    "The diff must be a complete standard unified diff. Every hunk header must declare counts that exactly match its body:",
+    "- unchanged context lines start with a single space,",
+    "- added lines start with \"+\",",
+    "- removed lines start with \"-\".",
+    "Recount each hunk before returning: oldCount = context lines + removed lines, newCount = context lines + added lines.",
+    "Do not omit context lines, do not elide ranges, and do not put prose inside the diff.",
+  ].join("\n");
+}
+
+/**
+ * One model call plus validation. Returns a structured failure so the caller
+ * can decide whether the failure is retryable; it never throws for a provider
+ * or output problem.
+ */
+async function attemptProposal(
+  request: ProposalRequest,
+  sources: PermittedFileContent[],
+  correction?: string,
+): Promise<AttemptResult> {
+  const userPrompt = buildUserPrompt(request, sources);
+  const prompted = correction ? `${userPrompt}\n\n${correction}` : userPrompt;
+
+  let completion: Awaited<ReturnType<typeof callChatCompletion>>;
+  try {
+    completion = await callChatCompletion(
+      "coding",
+      CODING_SYSTEM_PROMPT,
+      prompted,
+      request.fetchImpl ? { fetchImpl: request.fetchImpl } : {},
+    );
+  } catch (error) {
+    const providerError =
+      error instanceof ProviderError
+        ? error
+        : new ProviderError("request_failed", "The model request could not be completed.");
+    console.error(`[coding] proposal request failed: ${providerError.message}`);
+
+    return {
+      ok: false,
+      kind: "provider",
+      error: providerFailureMessage(providerError),
+      issues: [providerError.message],
+    };
+  }
+
+  const parsed = extractJsonObject(completion.content);
+  if (parsed === null) {
+    console.error("[coding] proposal output was not valid JSON");
+    return { ok: false, kind: "unreadable", error: "The model did not return a readable proposal." };
+  }
+
+  const validated = validateProposal(parsed, {
+    source: "live" as ProposalSource,
+    model: completion.model,
+    id: request.id,
+    createdAt: request.createdAt,
+  });
+
+  if (!validated.ok) {
+    console.error("[coding] proposal failed validation:", validated.issues);
+    return {
+      ok: false,
+      kind: "validation",
+      error: "The model returned a proposal that failed validation.",
+      issues: validated.issues,
+    };
+  }
+
+  // The shape check above is deliberately broad; the applier's parser is the
+  // authority on whether a diff is complete. Run it here so a malformed live
+  // diff is an explicit error now, rather than a stored proposal that fails
+  // later at approval time. The parser itself is unchanged and stays strict.
+  const syntax = parseUnifiedDiff(validated.proposal.diff);
+  if (!syntax.ok) {
+    const reason = sanitizeReason(syntax.message);
+    console.error(`[coding] proposal diff is malformed: ${reason}`);
+    return {
+      ok: false,
+      kind: "diff",
+      reason,
+      // The UI renders this string, so the parser's reason is surfaced here
+      // instead of being hidden behind a generic message.
+      error: `The model returned a diff that is not a complete unified diff: ${reason}.`,
+      issues: [reason],
+    };
+  }
+
+  return { ok: true, proposal: validated.proposal };
+}
+
 /**
  * Produces a proposal.
  *
@@ -186,73 +320,30 @@ export async function requestProposal(
     };
   }
 
-  let completion: Awaited<ReturnType<typeof callChatCompletion>>;
-  try {
-    const sources = await readPermittedSources(request.projectRoot, request.featureRequest);
-    completion = await callChatCompletion(
-      "coding",
-      CODING_SYSTEM_PROMPT,
-      buildUserPrompt(request, sources),
-      request.fetchImpl ? { fetchImpl: request.fetchImpl } : {},
-    );
-  } catch (error) {
-    const providerError =
-      error instanceof ProviderError
-        ? error
-        : new ProviderError("request_failed", "The model request could not be completed.");
-    console.error(`[coding] proposal request failed: ${providerError.message}`);
+  const sources = await readPermittedSources(request.projectRoot, request.featureRequest);
 
-    return {
-      ok: false,
-      error:
-        providerError.code === "truncated"
-          ? "The coding response was cut off at the output-token limit, so no complete diff was produced. Raise CODING_MAX_OUTPUT_TOKENS or ask for a smaller change. No fixture proposal was substituted."
-          : providerError.code === "timeout"
-            ? "The coding request timed out. No fixture proposal was substituted."
-            : `The coding request failed (${providerError.code}). No fixture proposal was substituted.`,
-      issues: [providerError.message],
-    };
+  const first = await attemptProposal(request, sources);
+  if (first.ok) return { ok: true, proposal: first.proposal };
+
+  // Exactly one retry, and only for the failure the parser can name precisely:
+  // hunk counts that do not match the body. Every other failure is final.
+  if (first.kind !== "diff" || first.reason !== HUNK_COUNT_MISMATCH) {
+    return { ok: false, error: first.error, issues: first.issues };
   }
 
-  const raw = completion.content;
-  const parsed = extractJsonObject(raw);
-  if (parsed === null) {
-    console.error("[coding] proposal output was not valid JSON");
-    return {
-      ok: false,
-      error: "The model did not return a readable proposal.",
-    };
-  }
+  console.error("[coding] hunk counts mismatched; retrying once with a correction");
 
-  const validated = validateProposal(parsed, {
-    source: "live" as ProposalSource,
-    model: completion.model,
-    id: request.id,
-    createdAt: request.createdAt,
-  });
+  const retry = await attemptProposal(request, sources, buildCorrectionPrompt(first.reason));
+  if (retry.ok) return { ok: true, proposal: retry.proposal };
 
-  if (!validated.ok) {
-    console.error("[coding] proposal failed validation:", validated.issues);
-    return {
-      ok: false,
-      error: "The model returned a proposal that failed validation.",
-      issues: validated.issues,
-    };
-  }
-
-  // The shape check above is deliberately broad; the applier's parser is the
-  // authority on whether a diff is complete. Run it here so a malformed live
-  // diff is an explicit error now, rather than a stored proposal that fails
-  // later at approval time. The parser itself is unchanged and stays strict.
-  const syntax = parseUnifiedDiff(validated.proposal.diff);
-  if (!syntax.ok) {
-    console.error(`[coding] proposal diff is malformed: ${syntax.message}`);
-    return {
-      ok: false,
-      error: "The model returned a diff that is not a complete unified diff.",
-      issues: [syntax.message],
-    };
-  }
-
-  return { ok: true, proposal: validated.proposal };
+  // The retry failed too. Report it explicitly; a configured provider never
+  // falls back to the fixture.
+  return {
+    ok: false,
+    error:
+      retry.kind === "diff"
+        ? `The model returned a diff that is not a complete unified diff after one corrective retry: ${retry.reason ?? "unknown parser error"}.`
+        : retry.error,
+    issues: retry.issues,
+  };
 }

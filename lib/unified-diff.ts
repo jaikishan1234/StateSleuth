@@ -17,6 +17,12 @@ export type Hunk = {
 
 export type Section = { path: string; hunks: Hunk[] };
 
+/**
+ * The one parser failure the coding agent may retry. Exported so the retry
+ * check and the parser message cannot drift apart.
+ */
+export const HUNK_COUNT_MISMATCH = "a hunk's line counts do not match its header";
+
 /** Parses a unified diff into per-file hunks. Rejects anything unexpected. */
 export function parseUnifiedDiff(
   diff: string,
@@ -82,7 +88,7 @@ export function parseUnifiedDiff(
       const newLines = hunk.lines.filter((entry) => entry.startsWith(" ") || entry.startsWith("+")).length;
 
       if (oldLines !== hunk.oldCount || newLines !== hunk.newCount) {
-        return { ok: false, message: "a hunk's line counts do not match its header" };
+        return { ok: false, message: HUNK_COUNT_MISMATCH };
       }
 
       section.hunks.push(hunk);

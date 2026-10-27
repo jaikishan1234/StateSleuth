@@ -32,6 +32,21 @@ export const DEFAULT_MAX_OUTPUT_TOKENS: Record<AgentName, number> = {
 /** Accepted range for a configured output budget. */
 export const OUTPUT_TOKEN_LIMITS = { min: 256, max: 16_000 } as const;
 
+/**
+ * Request deadlines, per agent.
+ *
+ * The whole deadline covers receiving response headers and reading the body.
+ * Only the planner is configurable (PLANNER_TIMEOUT_MS); the coding agent keeps
+ * the 45 s it has always used.
+ */
+export const DEFAULT_TIMEOUT_MS: Record<AgentName, number> = {
+  planner: 90_000,
+  coding: 45_000,
+};
+
+/** Accepted range for PLANNER_TIMEOUT_MS. */
+export const TIMEOUT_LIMITS = { min: 5_000, max: 300_000 } as const;
+
 export type ProviderDefaults = {
   baseUrl: string;
   model: string;
@@ -67,6 +82,7 @@ export type ProviderErrorCode =
   | "invalid_base_url"
   | "invalid_model"
   | "invalid_output_limit"
+  | "invalid_timeout"
   | "auth"
   | "not_found"
   | "rate_limit"
@@ -102,6 +118,12 @@ export type ResolvedProvider = {
    * type-checks; `buildChatRequest` then falls back to the agent default.
    */
   maxOutputTokens?: number;
+  /**
+   * Whole-request deadline in milliseconds, covering headers and body. Optional
+   * so a hand-built config still type-checks; the transport falls back to the
+   * agent default.
+   */
+  timeoutMs?: number;
 };
 
 export type ProviderResolution =
@@ -214,6 +236,28 @@ export function resolveProviderConfig(agent: AgentName): ProviderResolution {
     maxOutputTokens = parsed;
   }
 
+  let timeoutMs = DEFAULT_TIMEOUT_MS[agent];
+  if (agent === "planner") {
+    const timeoutRaw = readEnv("PLANNER_TIMEOUT_MS");
+    if (timeoutRaw.length > 0) {
+      const parsedTimeout = Number(timeoutRaw);
+      if (
+        !Number.isInteger(parsedTimeout) ||
+        parsedTimeout < TIMEOUT_LIMITS.min ||
+        parsedTimeout > TIMEOUT_LIMITS.max
+      ) {
+        return {
+          ok: false,
+          error: new ProviderError(
+            "invalid_timeout",
+            `PLANNER_TIMEOUT_MS for the planner agent must be a whole number between ${TIMEOUT_LIMITS.min} and ${TIMEOUT_LIMITS.max}.`,
+          ),
+        };
+      }
+      timeoutMs = parsedTimeout;
+    }
+  }
+
   const apiKey =
     readEnv(`${prefix}_API_KEY`) ||
     defaults.keyEnv.map(readEnv).find((value) => value.length > 0) ||
@@ -241,6 +285,7 @@ export function resolveProviderConfig(agent: AgentName): ProviderResolution {
       configured: apiKey.length > 0,
       providerHost: parsed.host,
       maxOutputTokens,
+      timeoutMs,
     },
   };
 }

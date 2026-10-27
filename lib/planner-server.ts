@@ -21,6 +21,7 @@ import {
   type PlanMode,
 } from "./planner.ts";
 import {
+  DEFAULT_TIMEOUT_MS,
   buildChatRequest,
   providerErrorForStatus,
   providerErrorFromUnknown,
@@ -29,9 +30,6 @@ import {
   type AgentName,
   type ProviderId,
 } from "./provider-config.ts";
-
-/** Unchanged from the Phase 3 implementation. */
-export const MODEL_TIMEOUT_MS = 45_000;
 
 export type PlanOutcome =
   | { mode: "live"; model: string; plan: FeaturePlan }
@@ -72,6 +70,9 @@ export async function callChatCompletion(
   const config = resolution.config;
   const request = buildChatRequest(config, systemPrompt, userPrompt);
   const doFetch = options.fetchImpl ?? fetch;
+  // The deadline covers the whole exchange: opening the connection, receiving
+  // headers, and consuming the body below.
+  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS[config.agent];
 
   let response: Response;
   try {
@@ -79,7 +80,7 @@ export async function callChatCompletion(
       method: "POST",
       headers: request.headers,
       body: JSON.stringify(request.body),
-      signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
       cache: "no-store",
     });
   } catch (error) {
@@ -95,7 +96,16 @@ export async function callChatCompletion(
   let payload: unknown;
   try {
     payload = await response.json();
-  } catch {
+  } catch (error) {
+    // The abort signal also covers the body. A body interrupted at the deadline
+    // is a timeout, not a malformed response; only genuine parse failures are
+    // reported as unreadable. Neither branch includes the body or headers.
+    if (isTimeoutOrAbort(error)) {
+      throw new ProviderError(
+        "timeout",
+        `The ${config.provider} response timed out before it was fully received.`,
+      );
+    }
     throw new ProviderError("bad_response", `The ${config.provider} API returned an unreadable response.`);
   }
 
@@ -120,6 +130,17 @@ export async function callChatCompletion(
   }
 
   return { content, model: config.model, provider: config.provider };
+}
+
+/**
+ * True when a body-read rejection came from the request deadline rather than
+ * from the bytes themselves. `AbortSignal.timeout` rejects with a DOMException
+ * named TimeoutError; an aborted stream surfaces as AbortError.
+ */
+function isTimeoutOrAbort(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const name = (error as { name?: unknown }).name;
+  return name === "TimeoutError" || name === "AbortError";
 }
 
 function planFailureMessage(error: ProviderError): string {
